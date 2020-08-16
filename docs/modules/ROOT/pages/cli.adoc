@@ -49,6 +49,8 @@ To add a user to the local database users, run `./piggy user create -u <username
 
 Piggy Bank will return the user and their generated password.
 
+NOTE: User creation supports the `-j` flag for JSON formatted output.
+
 === Deleting Users
 
 To delete a user, run `./piggy user delete -u <username>`
@@ -70,6 +72,8 @@ To change a secret, just send another POST request with the new values.
 === Retrieving Credentials
 
 To lookup a credential run `./piggy cred lookup -a <application> -u <cred user>`. 
+
+NOTE: Credential lookup supports the `-j` flag for JSON formatted output.
 
 === Deleting Credentials
 
