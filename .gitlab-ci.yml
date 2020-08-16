@@ -34,5 +34,5 @@ build:
     - tags
   artifacts:
     paths:
-      - piggy-linux-amd64.tar.gz
-      - piggy.zip
+      - piggy
+      - piggy.exe
