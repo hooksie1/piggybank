@@ -1,0 +1,12 @@
+= Overview
+
+https://github.com/hooksie1/piggybank[Piggy Bank^] is a simple password manager for teams using BoltDB as a backend.
+
+NOTE: Currently only basic authentication is available.
+
+== Contributing
+
+This project includes a Dockefile for working with VSCode. Ensure that you have the Remote Containers extension installed and Docker installed. VSCode will let you open the project in a container and have dependencies set up for you (including Go itself).
+
+'''
+I suck at development. This code is ugly and probably bad. If you see something that needs fixed, please open an issue and let me know. This is more of a learning experience for me.

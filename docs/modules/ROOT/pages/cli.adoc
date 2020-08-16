@@ -1,0 +1,91 @@
+= CLI
+
+The CLI tool interfaces with the API. The client can both start the server and interact with the server.
+
+== Config
+
+The Piggy Bank cli uses a config file. It defaults to `~/.piggybank.yaml`. The config stores your server URL, manager password, and your user credentials.
+
+Example:
+
+----
+server: http://localhost:8080
+manager_pass: "mpeKlRCpRHBYPvp8SGJOahjhV9pbul1zOlX2fiNiJxE"
+piggy_user: jhooks
+piggy_pass: "DLyVQ3eDMFHuS5drLXTKlKQcyiPtn2hTPB1aF7yh99E"
+----
+
+== Server
+
+To start the server, make sure to export `DATABASE_PATH`. Then just run `./piggy start`.
+
+== Initialization
+
+To initialize the database run `./piggy initialize`
+
+You will get back a response like this:
+
+----
+Master decrypt password is xsU8v0E8AuqAw2LAqxK/ezOtjw6Joj1CwDsxSzyYHx0
+User manager username: manager password: T0uND8wVnoNg7VntrKY72q5A33LHjWWLWSypqlUcCrI
+----
+
+IMPORTANT: The decryption key is only available one time. If you lose it all data is lost.                
+
+
+== Unlocking
+
+To unlock the database, run `./piggy unlock -p <decrypt-pass>`. 
+
+== Users
+
+To add and remove users, use the `user` subcommand.
+
+NOTE: To create or delete users you must have the manager credentials.
+
+=== Creating Users
+
+To add a user to the local database users, run `./piggy user create -u <username>`
+
+Piggy Bank will return the user and their generated password.
+
+=== Deleting Users
+
+To delete a user, run `./piggy user delete -u <username>`
+
+== Credentials
+
+To add and delete credentials, use the `cred` subcommand.
+
+NOTE: Only database users can create, delete, and view credentials. The mananger account cannot.
+
+=== Adding Credentials
+
+To add a credential run `./piggy cred create -a <application> -u <cred user> -p <cred password>`
+
+Multiple user/password pairs can be added to a single application. 
+
+To change a secret, just send another POST request with the new values.
+
+=== Retrieving Credentials
+
+To lookup a credential run `./piggy cred lookup -a <application> -u <cred user>`. 
+
+=== Deleting Credentials
+
+To lookup a credential run `./piggy cred delete -a <application> -u <cred user>`.
+
+== Backups
+
+You can backup the database in two ways. You can either specify a local backup to the server or locally to your client.
+
+NOTE: The manager account is the ONLY account that can backup the database. The database is also encrypted, so you will still need the encryption key to decrypt the backup.
+
+=== Local to Server
+
+To backup the database locally to where the server is running, just run `./piggy backup`. It will create a file named `backup.db` in the same location that the server is running.
+
+=== Local to Client
+
+To backup the database over HTTP local to your client, just run `./piggy backup -l -p /path/to/backup.db`. It will create a backup on the local system where the client is running at the specified path.
+

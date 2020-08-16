@@ -1,0 +1,5 @@
+name: piggybank
+title: Piggy Bank
+version: master
+nav:
+- modules/ROOT/nav.adoc

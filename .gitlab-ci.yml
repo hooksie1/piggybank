@@ -1,0 +1,38 @@
+image: golang
+
+stages:
+  - test
+  - build
+
+before_script:
+  - make dep
+
+unit_tests:
+  stage: test
+  script: 
+    - make test
+
+code_coverage:
+  stage: test
+  script:
+    - make coverage
+  artifacts:
+    paths:
+      - coverage.html
+
+lint_code:
+  stage: test
+  script:
+    make lint
+  allow_failure: true
+
+build:
+  stage: build
+  script:
+    - make build
+  only:
+    - tags
+  artifacts:
+    paths:
+      - piggy-linux-amd64.tar.gz
+      - piggy.zip

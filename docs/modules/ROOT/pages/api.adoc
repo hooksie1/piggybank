@@ -1,0 +1,70 @@
+= API
+
+Piggy Bank is controlled through it's API. 
+
+NOTE: Currently only basic authentication is supported.
+
+== Initialization
+
+Send a POST request to `/init/initialize` and Piggy Bank will return the master decryption key and a manager password.
+
+IMPORTANT: The decryption key is only available one time. If you lose it all data is lost.                
+                                                                                                     
+== Unlocking
+
+To unlock the database, send a POST request to `/init/unlock` with the master key in the body:
+
+----
+{
+    "master_password": "password from initialization"
+}
+----
+
+Anytime the application is stopped, you will need to unlock the database again after start up. The key is only stored in memory.
+
+== Adding Users
+
+Users can be added without decrypting the database. Send a POST request to `/api/users/{userName}` to create a user with that username.
+
+NOTE: You must use the manager account to create users. The manager account is the ONLY account able to create users.
+
+== Adding Credentials
+
+Secrets can be added by sending a POST request to `/api/password` with the secret's details in the body:
+
+----
+{
+    "application": "appA",
+    "username": "testuser",
+    "password": "this is the password"
+}
+----
+
+Multiple username/password pairs can be added to a single application. Currently, to override a secret just send another POST request with the change.
+
+NOTE: Only users created by the manager account can create or retrieve secrets. The manager account CANNOT add or retrieve secrets.
+
+== Retrieving Credentials
+
+Secrets can be retrieved by sending a GET request to `/api/password` and appending the app details in a query string:
+
+----
+/api/password?application=appA&username=testuser
+----
+
+== Backing Up The Database
+
+You can back up the database in two ways. You can either specify a local backup which will back up in the same area that Piggy Bank is running, or you can backup over HTTP to your local system. You can define this with a query string on a POST request to `/api/backup`:
+
+----
+/api/backup?type=local
+----
+
+----
+/api/backup?type=http
+----
+
+An example with cURL for the http version: `curl -X POST -u 'manager:manager_pass' server:8080/api/backup?type=http > db-backup.db`
+
+
+NOTE: The manager account is the ONLY account that can backup the database. The database is also encrypted, so you will still need the encryption key to decrypt.
