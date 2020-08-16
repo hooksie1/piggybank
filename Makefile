@@ -23,9 +23,7 @@ dep: ## Get the dependencies
 
 build: dep ## Build the binary file
 	@CGO_ENABLED=0 GOOS=linux go build -a -ldflags "-w -X 'github.com/hooksie1/piggybank/cmd.Version=$(VERSION)'" -o piggy
-	@tar -czvf piggy-linux-amd64.tar.gz piggy
 	@CGO_ENABLED=0 GOOS=windows go build -a -ldflags "-w -X 'github.com/hooksie1/piggybank/cmd.Version=$(VERSION)'" -o piggy.exe
-	@zip piggy.zip piggy.exe
 
 docker: build
 	@docker build -f Dockerfile.app -t hooksie1/piggy-bank:$(VERSION) .
