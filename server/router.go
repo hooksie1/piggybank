@@ -94,7 +94,7 @@ func checkUser(user, pass string) bool {
 
 	dbUser := User{
 		Username: user,
-		Pass: &Password{
+		Password: &Password{
 			PlainText: pass,
 		},
 	}
@@ -104,7 +104,7 @@ func checkUser(user, pass string) bool {
 		return false
 	}
 
-	if dbUser.Pass.hash == "" {
+	if dbUser.hash == "" {
 		return false
 	}
 

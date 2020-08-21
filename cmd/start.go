@@ -1,8 +1,8 @@
 package cmd
 
 import (
-	"github.com/hooksie1/piggybank/server"
 	"github.com/spf13/cobra"
+	"gitlab.com/hooksie1/piggybank/server"
 )
 
 // startCmd represents the start command

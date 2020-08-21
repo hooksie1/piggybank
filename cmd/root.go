@@ -12,7 +12,6 @@ import (
 
 var cfgFile string
 var url string
-var jsonTrue bool
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
@@ -40,10 +39,9 @@ func init() {
 
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.piggybank.yml)")
 	rootCmd.PersistentFlags().StringP("server", "s", "", "server loaded from config")
-	rootCmd.PersistentFlags().BoolVarP(&jsonTrue, "json", "j", false, "returns data in json format")
-	rootCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
+	rootCmd.PersistentFlags().BoolP("json", "j", false, "returns data in json format")
 	viper.BindPFlag("server", rootCmd.PersistentFlags().Lookup("server"))
-	viper.BindPFlag("json", rootCmd.PersistentFlags().Lookup("json"))
+	viper.BindPFlag("jsonTrue", rootCmd.PersistentFlags().Lookup("json"))
 
 }
 

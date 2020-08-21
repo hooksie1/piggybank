@@ -28,6 +28,10 @@ type MasterPass struct {
 	MasterPassword string `json:"master_password"`
 }
 
+func (a *Application) String() string {
+	return fmt.Sprintf("Application: %s\nUsername: %s\nPassword: %s", a.Application, a.Username, a.Password)
+}
+
 // NewPassword returns a pointer to a new password.
 func NewPassword() *Password {
 	pass := generatePass()
@@ -60,7 +64,7 @@ func HashPassword(s string) string {
 
 func (u *User) compareHash() bool {
 
-	err := bcrypt.CompareHashAndPassword([]byte(u.Pass.hash), []byte(u.Pass.PlainText))
+	err := bcrypt.CompareHashAndPassword([]byte(u.hash), []byte(u.PlainText))
 	if err != nil {
 		log.Printf("failed password check: %s", err)
 		return false

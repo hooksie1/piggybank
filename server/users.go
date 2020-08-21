@@ -11,7 +11,11 @@ import (
 // User holds information about a user.
 type User struct {
 	Username string
-	Pass     *Password
+	*Password
+}
+
+func (u *User) String() string {
+	return fmt.Sprintf("User Created\nUsername: %s\nPassword: %s", u.Username, u.PlainText)
 }
 
 // NewUser returns a pointer to a new DBUser.
@@ -20,7 +24,7 @@ func newUser(username string) *User {
 
 	return &User{
 		Username: username,
-		Pass:     pass,
+		Password: pass,
 	}
 }
 
@@ -84,7 +88,7 @@ func (u *User) addUser() error {
 	record := &BoltRecord{
 		Bucket: "Users",
 		Key:    []byte(u.Username),
-		Value:  []byte(u.Pass.hash),
+		Value:  []byte(u.hash),
 	}
 
 	if err := WriteRecord(record); err != nil {
@@ -115,7 +119,7 @@ func (u *User) getUser() error {
 
 	err := record.GetRecord()
 
-	u.Pass.hash = string(record.Value)
+	u.hash = string(record.Value)
 
 	if err != nil {
 		return fmt.Errorf("error getting user: %s", err)

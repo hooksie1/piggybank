@@ -13,32 +13,29 @@ import (
 
 // backupCmd represents the backup command
 var (
-	local bool
-	path  string
-
 	backupCmd = &cobra.Command{
 		Use:   "backup",
 		Short: "Backup the database (must use the manager account)",
-		Run: func(cmd *cobra.Command, args []string) {
-			backup()
-
-		},
+		Run:   backup,
 	}
 )
 
 func init() {
 	rootCmd.AddCommand(backupCmd)
 
-	backupCmd.Flags().BoolVarP(&local, "local", "l", false, "Writes the backup locally")
-	backupCmd.Flags().StringVarP(&path, "path", "p", "", "Path for local backup")
-	viper.BindPFlag("local", backupCmd.Flags().Lookup("local"))
-	viper.BindPFlag("path", backupCmd.Flags().Lookup("path"))
+	backupCmd.Flags().BoolP("local", "l", false, "Writes the backup locally")
+	backupCmd.Flags().StringP("path", "p", "", "Path for local backup")
+	viper.BindPFlag("backLocal", backupCmd.Flags().Lookup("local"))
+	viper.BindPFlag("backPath", backupCmd.Flags().Lookup("path"))
 }
 
-func backup() {
+func backup(cmd *cobra.Command, args []string) {
 	host := viper.GetString("server")
 	managerPass := viper.GetString("manager_pass")
 	backupType := "local"
+
+	local := viper.GetBool("backLocal")
+	path := viper.GetString("backPath")
 
 	if local && path == "" {
 		log.Println("You must supply a path for the local backup")
@@ -85,7 +82,7 @@ func backup() {
 	}
 
 	if local {
-		err = writeBackup(body)
+		err = writeBackup(body, path)
 		if err != nil {
 			log.Printf("Error writing backup to file: %s", err)
 			os.Exit(1)
@@ -96,7 +93,7 @@ func backup() {
 
 }
 
-func writeBackup(data []byte) error {
+func writeBackup(data []byte, path string) error {
 
 	err := ioutil.WriteFile(path, data, 0600)
 	if err != nil {

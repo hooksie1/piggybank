@@ -16,25 +16,23 @@ type MasterPass struct {
 	Password string `json:"master_password"`
 }
 
-var unlockPass string
-
 // unlockCmd represents the unlock command
 var unlockCmd = &cobra.Command{
 	Use:   "unlock",
 	Short: "Unlock the database with the master password",
-	Run: func(cmd *cobra.Command, args []string) {
-		unlock()
-	},
+	Run:   unlock,
 }
 
 func init() {
 	rootCmd.AddCommand(unlockCmd)
-	unlockCmd.Flags().StringVarP(&unlockPass, "password", "p", "", "the unlock password to use")
+	unlockCmd.Flags().StringP("password", "p", "", "the unlock password to use")
+	viper.BindPFlag("unlockPass", unlockCmd.Flags().Lookup("password"))
 
 }
 
-func unlock() {
+func unlock(cmd *cobra.Command, args []string) {
 	host := viper.GetString("server")
+	unlockPass := viper.GetString("unlockPass")
 
 	pass := MasterPass{
 		Password: unlockPass,

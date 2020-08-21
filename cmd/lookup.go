@@ -8,33 +8,31 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"gitlab.com/hooksie1/piggybank/server"
 )
-
-var credApp string
-var credUser string
 
 // lookupCmd represents the lookup command
 var lookupCmd = &cobra.Command{
 	Use:   "lookup",
 	Short: "Lookup a credential",
-	Run: func(cmd *cobra.Command, args []string) {
-		lookupCred()
-	},
+	Run:   lookupCred,
 }
 
 func init() {
-	lookupCmd.Flags().StringVarP(&credApp, "app", "a", "", "the application to look up")
-	lookupCmd.Flags().StringVarP(&credUser, "user", "u", "", "the user in the application to retrieve")
-	viper.BindPFlag("app", lookupCmd.Flags().Lookup("app"))
-	viper.BindPFlag("user", lookupCmd.Flags().Lookup("user"))
+	lookupCmd.Flags().StringP("app", "a", "", "the application to look up")
+	lookupCmd.Flags().StringP("user", "u", "", "the user in the application to retrieve")
+	viper.BindPFlag("credApp", lookupCmd.Flags().Lookup("app"))
+	viper.BindPFlag("credUser", lookupCmd.Flags().Lookup("user"))
 }
 
-func lookupCred() {
+func lookupCred(cmd *cobra.Command, args []string) {
 	host := viper.GetString("server")
 	piggyUser := viper.GetString("piggy_user")
 	piggyPass := viper.GetString("piggy_pass")
+	credUser := viper.GetString("credUser")
+	credApp := viper.GetString("credApp")
 
-	app := &PApp{}
+	app := &server.Application{}
 
 	if credApp == "" || credUser == "" {
 		log.Println("You must supply an application and username")

@@ -51,7 +51,7 @@ func TestCompareHash(t *testing.T) {
 
 	ok := user.compareHash()
 	if !ok {
-		t.Errorf("Password %s does not match hash %s.", user.Pass.PlainText, user.Pass.hash)
+		t.Errorf("Password %s does not match hash %s.", user.PlainText, user.hash)
 	}
 
 }

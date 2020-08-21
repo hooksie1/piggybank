@@ -13,13 +13,11 @@ var userCmd = &cobra.Command{
 	},
 }
 
-var sysUser string
-
 func init() {
 	rootCmd.AddCommand(userCmd)
 	userCmd.AddCommand(createUserCmd)
 	userCmd.AddCommand(deleteUserCmd)
 
-	userCmd.PersistentFlags().StringVarP(&sysUser, "user", "u", "", "the user to create")
-	viper.BindPFlag("user", userCmd.PersistentFlags().Lookup("user"))
+	userCmd.PersistentFlags().StringP("user", "u", "", "the user to create")
+	viper.BindPFlag("sysUser", userCmd.PersistentFlags().Lookup("user"))
 }

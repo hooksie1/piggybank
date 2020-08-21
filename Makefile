@@ -22,8 +22,8 @@ dep: ## Get the dependencies
 	@go get -u golang.org/x/lint/golint
 
 build: dep ## Build the binary file
-	@CGO_ENABLED=0 GOOS=linux go build -a -ldflags "-w -X 'github.com/hooksie1/piggybank/cmd.Version=$(VERSION)'" -o piggy
-	@CGO_ENABLED=0 GOOS=windows go build -a -ldflags "-w -X 'github.com/hooksie1/piggybank/cmd.Version=$(VERSION)'" -o piggy.exe
+	@CGO_ENABLED=0 GOOS=linux go build -a -ldflags "-w -X 'gitlab.com/hooksie1/piggybank/cmd.Version=$(VERSION)'" -o piggy
+	@CGO_ENABLED=0 GOOS=windows go build -a -ldflags "-w -X 'gitlab.com/hooksie1/piggybank/cmd.Version=$(VERSION)'" -o piggy.exe
 
 docker: build
 	@docker build -f Dockerfile.app -t hooksie1/piggy-bank:$(VERSION) .

@@ -14,17 +14,16 @@ import (
 var deleteUserCmd = &cobra.Command{
 	Use:   "delete",
 	Short: "Delete an existing user",
-	Run: func(cmd *cobra.Command, args []string) {
-		deleteUser()
-	},
+	Run:   deleteUser,
 }
 
 func init() {
 }
 
-func deleteUser() {
+func deleteUser(cmd *cobra.Command, args []string) {
 	host := viper.GetString("server")
 	manPass := viper.GetString("manager_pass")
+	sysUser := viper.GetString("sysUser")
 
 	client := http.Client{}
 

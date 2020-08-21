@@ -6,30 +6,15 @@ import (
 	"io"
 	"io/ioutil"
 
-	"github.com/hooksie1/piggybank/server"
+	"github.com/spf13/viper"
 )
-
-type PUser struct {
-	*server.User
-}
-
-type PApp struct {
-	*server.Application
-}
 
 type Printer interface {
 	String() string
 }
 
-func (u *PUser) String() string {
-	return fmt.Sprintf("User Created\nUsername: %s\nPassword: %s", u.Username, u.Pass.PlainText)
-}
-
-func (p *PApp) String() string {
-	return fmt.Sprintf("Application: %s\nUsername: %s\nPassword: %s", p.Application.Application, p.Username, p.Password)
-}
-
 func PrintData(p Printer, r io.ReadCloser) error {
+	jsonTrue := viper.GetBool("jsonTrue")
 	if jsonTrue {
 		data, err := GetJson(r)
 		if err != nil {
@@ -48,7 +33,6 @@ func PrintData(p Printer, r io.ReadCloser) error {
 }
 
 func GetData(r io.ReadCloser, v interface{}) error {
-
 	err := json.NewDecoder(r).Decode(v)
 	if err != nil {
 		return err

@@ -23,7 +23,7 @@ func initializeManager() (string, error) {
 		return "", err
 	}
 
-	return user.Pass.PlainText, nil
+	return user.PlainText, nil
 }
 
 func initializeDB(key []byte) error {

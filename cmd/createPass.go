@@ -13,28 +13,25 @@ import (
 	"github.com/spf13/viper"
 )
 
-var application string
-var user string
-var pass string
-
 // creatPassCmd represents the creatPass command
 var createPassCmd = &cobra.Command{
 	Use:   "create",
 	Short: "Create a credential (cannot use the manager account)",
-	Run: func(cmd *cobra.Command, args []string) {
-		createPass()
-	},
+	Run:   createPass,
 }
 
 func init() {
-	createPassCmd.Flags().StringVarP(&pass, "pass", "p", "", "the user's password ")
+	createPassCmd.Flags().StringP("pass", "p", "", "the user's password ")
 	viper.BindPFlag("pass", createPassCmd.Flags().Lookup("pass"))
 }
 
-func createPass() {
+func createPass(cmd *cobra.Command, args []string) {
 	host := viper.GetString("server")
 	piggyUser := viper.GetString("piggy_user")
 	piggyPass := viper.GetString("piggy_pass")
+	application := viper.GetString("app")
+	user := viper.GetString("appUser")
+	pass := viper.GetString("pass")
 
 	if application == "" || user == "" || pass == "" {
 		log.Println("You must supply an application, username, and password")

@@ -25,8 +25,8 @@ func init() {
 	credCmd.AddCommand(lookupCmd)
 	credCmd.AddCommand(deletePassCmd)
 
-	credCmd.PersistentFlags().StringVarP(&application, "app", "a", "", "the application for the credential")
-	credCmd.PersistentFlags().StringVarP(&user, "user", "u", "", "the application username")
+	credCmd.PersistentFlags().StringP("app", "a", "", "the application for the credential")
+	credCmd.PersistentFlags().StringP("user", "u", "", "the application username")
 	viper.BindPFlag("app", credCmd.PersistentFlags().Lookup("app"))
-	viper.BindPFlag("user", credCmd.PersistentFlags().Lookup("user"))
+	viper.BindPFlag("appUser", credCmd.PersistentFlags().Lookup("user"))
 }

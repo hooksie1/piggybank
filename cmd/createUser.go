@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"gitlab.com/hooksie1/piggybank/server"
 )
 
 // createUserCmd represents the createUser command
@@ -26,8 +27,9 @@ func init() {
 func createUser() {
 	host := viper.GetString("server")
 	manPass := viper.GetString("manager_pass")
+	sysUser := viper.GetString("sysUser")
 
-	user, client := &PUser{}, http.Client{}
+	user, client := &server.User{}, http.Client{}
 
 	req, err := NewRequest(
 		SetMethod("POST"),
