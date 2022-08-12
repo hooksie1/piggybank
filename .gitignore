@@ -1,0 +1,8 @@
+*.db
+deployment/
+piggy
+piggy.exe
+piggy*.tar.gz
+piggy*.zip
+
+dist/

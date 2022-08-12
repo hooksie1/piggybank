@@ -1,0 +1,20 @@
+before:
+  hooks:
+  - go mod tidy
+  
+project_name: piggybank
+
+builds:
+  - ldflags: "-extldflags= -w -X 'github.com/hooksie1/piggybank/cmd.Version={{.Tag}}-{{.ShortCommit}}'"
+    env:
+      - "CGO_ENABLED=0"
+      - "GO111MODULE=on"
+    goos:
+      - linux
+      - windows
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+source:
+  enabled: true
