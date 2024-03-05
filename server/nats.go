@@ -4,18 +4,15 @@ import (
 	"crypto/aes"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
 	"strconv"
 
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/micro"
 )
 
 var (
-	ErrInitialized    = errors.New("database already initialized")
-	InitializeSubject = fmt.Sprintf("%s.database.initialize", piggyBucket)
-	UnlockSubject     = fmt.Sprintf("%s.database.unlock", piggyBucket)
-	LockSubject       = fmt.Sprintf("%s.database.lock", piggyBucket)
+	ErrInitialized = errors.New("database already initialized")
 )
 
 // ResponseMessage holds a response to the caller
@@ -59,59 +56,59 @@ func (n *NatsBackend) Connect() error {
 	return nil
 }
 
-// Watch is the entrypoint for new messages
-func (n *NatsBackend) Watch() {
-	subject := "piggybank.>"
-	log.Printf("watching for requests on %s", subject)
-	_, err := n.Conn.Subscribe(subject, n.HandleAndLogRequests)
+func (n *NatsBackend) SetupMicro() error {
+	log.Println("setting up micro")
+	srv, err := micro.AddService(n.Conn, micro.Config{
+		Name:    "Piggybank",
+		Version: "1.0.0",
+		Endpoint: &micro.EndpointConfig{
+			Subject: "piggybank.>",
+			Handler: micro.HandlerFunc(n.HandleRequests),
+		},
+	})
 	if err != nil {
-		log.Printf("Error in piggybank service: %s", err)
+		return err
 	}
+
+	databaseGroup := srv.AddGroup("piggybank.database")
+	if err := databaseGroup.AddEndpoint("lock", micro.HandlerFunc(n.LockRequest)); err != nil {
+		return err
+	}
+
+	if err := databaseGroup.AddEndpoint("unlock", micro.HandlerFunc(n.UnlockRequest)); err != nil {
+		return err
+	}
+
+	if err := databaseGroup.AddEndpoint("initialize", micro.HandlerFunc(n.InitializeRequest)); err != nil {
+		return err
+	}
+
+	return nil
 }
 
-// HandleAndLogRequests just logs the request as it comes in
-func (n *NatsBackend) HandleAndLogRequests(m *nats.Msg) {
-	log.Printf("%s request sent on subject %s", m.Header.Get("method"), m.Subject)
-
-	n.HandleRequests(m)
-}
-
-// HandleRequests determins if the request is a database action (initialization or locking/unlocking) based on the subject name.
-func (n *NatsBackend) HandleRequests(m *nats.Msg) {
-
-	if m.Subject == InitializeSubject || m.Subject == UnlockSubject || m.Subject == LockSubject {
-		msg := n.HandleDatabaseAction(m)
-		if err := m.RespondMsg(msg.Marshal()); err != nil {
-			log.Printf("error responding to message: %s", err)
-		}
-		return
-	}
+// HandleRequests handles a non database specific request
+func (n *NatsBackend) HandleRequests(req micro.Request) {
 
 	if databaseKey == nil {
 		msg := ResponseMessage{
 			Code:  403,
 			Error: "database locked",
 		}
-		if err := m.RespondMsg(msg.Marshal()); err != nil {
-			log.Printf("error responding to message: %s", err)
-		}
-		return
+		req.Respond(msg.body(), micro.WithHeaders(msg.headers()))
 	}
 
-	msg := n.HandleKeyAction(m)
-	if err := m.RespondMsg(msg.Marshal()); err != nil {
-		log.Printf("error responding to message: %s", err)
-	}
+	msg := n.HandleKeyAction(req)
+	req.Respond(msg.body(), micro.WithHeaders(msg.headers()))
 }
 
 // HandleKeyAction handles the action for the requested key based on the method in the header
-func (n *NatsBackend) HandleKeyAction(m *nats.Msg) *ResponseMessage {
+func (n *NatsBackend) HandleKeyAction(req micro.Request) *ResponseMessage {
 	var msg *ResponseMessage
-	record := NewJSRecord().SetBucket(piggyBucket).SetSanitizedKey(m.Subject)
+	record := NewJSRecord().SetBucket(piggyBucket).SetSanitizedKey(req.Subject())
 
-	switch m.Header.Get("method") {
+	switch req.Headers().Get("method") {
 	case "post":
-		record.SetValue(string(m.Data))
+		record.SetValue(string(req.Data()))
 		record.SetEncryptionKey(databaseKey)
 		msg = n.addRecord(record)
 	case "get":
@@ -126,50 +123,60 @@ func (n *NatsBackend) HandleKeyAction(m *nats.Msg) *ResponseMessage {
 
 }
 
-func (n *NatsBackend) HandleDatabaseAction(m *nats.Msg) *ResponseMessage {
+// LockRequest locks the database
+func (n *NatsBackend) LockRequest(req micro.Request) {
+	n.Lock()
+
+	m := ResponseMessage{
+		Code:    200,
+		Details: "database locked",
+	}
+
+	req.Respond(m.body(), micro.WithHeaders(m.headers()))
+}
+
+// UnlockRequest unlocks the database if it is locked
+func (n *NatsBackend) UnlockRequest(req micro.Request) {
 	var unlocked bool
 	kv := NewJSRecord().SetBucket(piggyBucket).SetKey("init")
 	if databaseKey != nil {
 		unlocked = true
 	}
 
-	if m.Subject == LockSubject {
-		n.Lock()
-		return &ResponseMessage{
-			Code:    200,
-			Details: "database locked",
-		}
-	}
-
-	if m.Subject == UnlockSubject && unlocked {
-		return &ResponseMessage{
+	if unlocked {
+		m := ResponseMessage{
 			Code:  400,
 			Error: "database already unlocked",
 		}
+		req.Respond(m.body(), micro.WithHeaders(m.headers()))
 	}
 
 	_, err := n.GetRecord(kv)
 	if err != nil && err != nats.ErrKeyNotFound {
 		log.Println(err)
-		return &ResponseMessage{
+		m := ResponseMessage{
 			Code:  500,
 			Error: "internal server error",
 		}
+		req.Respond(m.body(), micro.WithHeaders(m.headers()))
 	}
 
-	if m.Subject == UnlockSubject && err == nats.ErrKeyNotFound {
-		return &ResponseMessage{
+	if err == nats.ErrKeyNotFound {
+		m := ResponseMessage{
 			Code:  400,
 			Error: "database not initialized",
 		}
+		req.Respond(m.body(), micro.WithHeaders(m.headers()))
 	}
 
-	if m.Subject == UnlockSubject {
-		return n.unlock(m)
-	}
+	m := n.unlock(req.Data())
+	req.Respond(m.body(), micro.WithHeaders(m.headers()))
+}
 
-	return n.initialize()
-
+// InitializeRequest intitializes the database if it is uninitialized
+func (n *NatsBackend) InitializeRequest(req micro.Request) {
+	m := n.initialize()
+	req.Respond(m.body(), micro.WithHeaders(m.headers()))
 }
 
 // initialize sets the initialization key. Once this is set it does not need to be run again, unless you lose the encryption key.
@@ -347,7 +354,7 @@ func (n *NatsBackend) DeleteRecord(k KV) error {
 }
 
 // unlock wraps Unlock and handles unmarshaling requests, verifying key size, and hanling responses
-func (n *NatsBackend) unlock(m *nats.Msg) *ResponseMessage {
+func (n *NatsBackend) unlock(data []byte) *ResponseMessage {
 	var key DatabaseKey
 
 	if databaseKey != nil {
@@ -357,7 +364,7 @@ func (n *NatsBackend) unlock(m *nats.Msg) *ResponseMessage {
 		}
 	}
 
-	if err := json.Unmarshal(m.Data, &key); err != nil {
+	if err := json.Unmarshal(data, &key); err != nil {
 		log.Printf("error unmarshaling json: %s", err)
 		return &ResponseMessage{
 			Code:  500,
@@ -414,6 +421,21 @@ func (n *NatsBackend) Lock() {
 	databaseKey = nil
 }
 
+func (r *ResponseMessage) body() []byte {
+	data, err := json.Marshal(r)
+	if err != nil {
+		return []byte(`{"error": "internal server error"}`)
+	}
+
+	return data
+}
+
+func (r *ResponseMessage) headers() map[string][]string {
+	return map[string][]string{
+		"Status": {strconv.Itoa(r.Code)},
+	}
+}
+
 // Marshal marshals a ResponseMessage into a NATS message
 func (r *ResponseMessage) Marshal() *nats.Msg {
 	var data []byte
@@ -426,7 +448,7 @@ func (r *ResponseMessage) Marshal() *nats.Msg {
 
 	return &nats.Msg{
 		Header: map[string][]string{
-			"Status": []string{status},
+			"Status": {status},
 		},
 		Data: data,
 	}

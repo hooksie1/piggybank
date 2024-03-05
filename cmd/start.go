@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"log"
 	"os"
 	"os/signal"
 	"syscall"
@@ -27,15 +28,16 @@ func start(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	s := server.NewServer()
 	n := server.NewNatsBackend(cfg.Config.URLs, opts)
 	if err := n.Connect(); err != nil {
 		return err
 	}
 
-	s.SetBackend(n)
+	if err := n.SetupMicro(); err != nil {
+		return err
+	}
 
-	go s.Serve()
+	log.Println("piggybank started")
 
 	sigTerm := make(chan os.Signal, 1)
 	signal.Notify(sigTerm, syscall.SIGINT, syscall.SIGTERM)
