@@ -1,6 +1,6 @@
 module github.com/hooksie1/piggybank
 
-go 1.18
+go 1.22
 
 require (
 	cuelang.org/go v0.4.3
