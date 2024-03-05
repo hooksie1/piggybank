@@ -1,3 +1,4 @@
 Config: {
-  urls: "nats://localhost:4222"
+  urls: "tls://connect.ngs.global"
+  creds: "/some/path/to/creds"
   }
