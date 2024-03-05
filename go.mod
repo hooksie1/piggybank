@@ -1,4 +1,4 @@
-module gitlab.com/hooksie1/piggybank
+module github.com/hooksie1/piggybank
 
 go 1.18
 
