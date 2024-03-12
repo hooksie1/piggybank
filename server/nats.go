@@ -70,7 +70,7 @@ func (n *NatsBackend) SetupMicro() error {
 		return err
 	}
 
-	databaseGroup := srv.AddGroup("piggybank.database")
+	databaseGroup := srv.AddGroup("piggybankdb")
 	if err := databaseGroup.AddEndpoint("lock", micro.HandlerFunc(n.LockRequest)); err != nil {
 		return err
 	}
