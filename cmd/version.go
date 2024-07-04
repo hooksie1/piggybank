@@ -8,7 +8,6 @@ import (
 
 var Version = "dev"
 
-// versionCmd represents the version command
 var versionCmd = &cobra.Command{
 	Use:   "version",
 	Short: "Prints the version",
