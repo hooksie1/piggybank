@@ -24,6 +24,17 @@ type ResponseMessage struct {
 	Details string `json:"details,omitempty"`
 }
 
+// SecretHandler wraps any secret handlers to check if database is currently locked
+func SecretHandler(a AppHandlerFunc) AppHandlerFunc {
+	return func(r micro.Request, app AppContext) error {
+		if databaseKey == nil {
+			return NewClientError(fmt.Errorf("database locked"), 403)
+		}
+		return a(r, app)
+	}
+
+}
+
 func Lock(r micro.Request, app AppContext) error {
 	databaseKey = nil
 	return r.RespondJSON(ResponseMessage{Details: "database locked"})
@@ -63,6 +74,11 @@ func Unlock(r micro.Request, app AppContext) error {
 	}
 
 	return r.RespondJSON(ResponseMessage{Details: "database successfully unlocked"})
+}
+
+// Wrap Status in secret handler so it will catch locked requests
+func Status(r micro.Request, app AppContext) error {
+	return r.RespondJSON(ResponseMessage{Details: "database unlocked"})
 }
 
 func GetRecord(r micro.Request, app AppContext) error {

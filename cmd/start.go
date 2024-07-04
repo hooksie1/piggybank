@@ -59,7 +59,7 @@ func start(cmd *cobra.Command, args []string) error {
 	//}
 
 	// uncomment to enable logging over NATS
-	//logger.SetOutput(cwnats.NewNatsLogger("prime.logs.piggybank", nc))
+	//logger.SetOutput(cwnats.NewNatsLogger("logs.piggybank", nc))
 
 	svc, err := micro.AddService(nc, config)
 	if err != nil {
@@ -76,6 +76,16 @@ func start(cmd *cobra.Command, args []string) error {
 			"response_schema": schemaString(&service.ResponseMessage{}),
 		}),
 		micro.WithEndpointSubject("initialize"),
+	)
+	dbGroup.AddEndpoint("status",
+		service.AppHandler(logger, service.SecretHandler(service.Status), appCtx),
+		micro.WithEndpointMetadata(map[string]string{
+			"description":     "returns the status of the database",
+			"format":          "application/json",
+			"request_schema":  "",
+			"response_schema": schemaString(&service.ResponseMessage{}),
+		}),
+		micro.WithEndpointSubject("status"),
 	)
 	dbGroup.AddEndpoint("lock",
 		service.AppHandler(logger, service.Lock, appCtx),
@@ -99,7 +109,7 @@ func start(cmd *cobra.Command, args []string) error {
 
 	appGroup := svc.AddGroup("piggybank.secrets", micro.WithGroupQueueGroup("app"))
 	appGroup.AddEndpoint("GET",
-		service.AppHandler(logger, service.GetRecord, appCtx),
+		service.AppHandler(logger, service.SecretHandler(service.GetRecord), appCtx),
 		micro.WithEndpointMetadata(map[string]string{
 			"description":     "Gets a secret",
 			"format":          "application/json",
@@ -109,7 +119,7 @@ func start(cmd *cobra.Command, args []string) error {
 		micro.WithEndpointSubject("GET.>"),
 	)
 	appGroup.AddEndpoint("POST",
-		service.AppHandler(logger, service.AddRecord, appCtx),
+		service.AppHandler(logger, service.SecretHandler(service.AddRecord), appCtx),
 		micro.WithEndpointMetadata(map[string]string{
 			"description":     "Adds a secret",
 			"format":          "application/json",
@@ -119,7 +129,7 @@ func start(cmd *cobra.Command, args []string) error {
 		micro.WithEndpointSubject("POST.>"),
 	)
 	appGroup.AddEndpoint("DELETE",
-		service.AppHandler(logger, service.DeleteRecord, appCtx),
+		service.AppHandler(logger, service.SecretHandler(service.DeleteRecord), appCtx),
 		micro.WithEndpointMetadata(map[string]string{
 			"description":     "Deletes a secret",
 			"format":          "application/json",
