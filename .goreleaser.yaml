@@ -3,6 +3,9 @@ env:
 
 project_name: piggybankctl
 
+archives:
+  - format: binary
+
 builds:
   - ldflags: "-extldflags= -w -X 'github.com/hooksie1/piggybank/cmd.Version={{.Tag}}'"
     flags:
