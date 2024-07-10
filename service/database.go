@@ -9,10 +9,11 @@ import (
 )
 
 const (
-	databaseInitSubject   = "piggybank.database.initialize"
-	databaseUnlockSubject = "piggybank.database.unlock"
-	databaseLockSubject   = "piggybank.database.lock"
-	databaseStatusSubject = "piggybank.database.status"
+	databaseSubject       = "piggybank.database"
+	databaseInitSubject   = "initialize"
+	databaseUnlockSubject = "unlock"
+	databaseLockSubject   = "lock"
+	databaseStatusSubject = "status"
 )
 
 type KV interface {

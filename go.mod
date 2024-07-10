@@ -7,7 +7,6 @@ toolchain go1.22.4
 require (
 	github.com/CoverWhale/coverwhale-go v1.2.1
 	github.com/CoverWhale/logr v0.0.0-20240513164108-a4fd5504b303
-	github.com/invopop/jsonschema v0.12.0
 	github.com/nats-io/jsm.go v0.1.1
 	github.com/nats-io/nats.go v1.36.0
 	github.com/segmentio/ksuid v1.0.4
@@ -19,8 +18,6 @@ require (
 require (
 	github.com/99designs/gqlgen v0.17.43 // indirect
 	github.com/agnivade/levenshtein v1.1.1 // indirect
-	github.com/bahlo/generic-list-go v0.2.0 // indirect
-	github.com/buger/jsonparser v1.1.1 // indirect
 	github.com/cpuguy83/go-md2man/v2 v2.0.4 // indirect
 	github.com/fsnotify/fsnotify v1.7.0 // indirect
 	github.com/google/uuid v1.4.0 // indirect
@@ -28,7 +25,6 @@ require (
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/klauspost/compress v1.17.7 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect
-	github.com/mailru/easyjson v0.7.7 // indirect
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
 	github.com/nats-io/nkeys v0.4.7 // indirect
 	github.com/nats-io/nuid v1.0.1 // indirect
@@ -43,7 +39,6 @@ require (
 	github.com/spf13/pflag v1.0.5 // indirect
 	github.com/subosito/gotenv v1.6.0 // indirect
 	github.com/vektah/gqlparser/v2 v2.5.11 // indirect
-	github.com/wk8/go-ordered-map/v2 v2.1.8 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/exp v0.0.0-20240506185415-9bf2ced13842 // indirect
 	golang.org/x/net v0.23.0 // indirect
