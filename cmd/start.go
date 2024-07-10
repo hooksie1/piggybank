@@ -6,7 +6,6 @@ import (
 	cwnats "github.com/CoverWhale/coverwhale-go/transports/nats"
 	"github.com/CoverWhale/logr"
 	"github.com/hooksie1/piggybank/service"
-	"github.com/invopop/jsonschema"
 	"github.com/nats-io/nats.go/micro"
 	"github.com/spf13/cobra"
 )
@@ -66,78 +65,8 @@ func start(cmd *cobra.Command, args []string) error {
 		logr.Fatal(err)
 	}
 
-	dbGroup := svc.AddGroup("piggybank.database", micro.WithGroupQueueGroup("database"))
-	dbGroup.AddEndpoint("initialize",
-		service.AppHandler(logger, service.Initialize, appCtx),
-		micro.WithEndpointMetadata(map[string]string{
-			"description":     "initializes the database",
-			"format":          "application/json",
-			"request_schema":  "",
-			"response_schema": schemaString(&service.ResponseMessage{}),
-		}),
-		micro.WithEndpointSubject("initialize"),
-	)
-	dbGroup.AddEndpoint("status",
-		service.AppHandler(logger, service.SecretHandler(service.Status), appCtx),
-		micro.WithEndpointMetadata(map[string]string{
-			"description":     "returns the status of the database",
-			"format":          "application/json",
-			"request_schema":  "",
-			"response_schema": schemaString(&service.ResponseMessage{}),
-		}),
-		micro.WithEndpointSubject("status"),
-	)
-	dbGroup.AddEndpoint("lock",
-		service.AppHandler(logger, service.Lock, appCtx),
-		micro.WithEndpointMetadata(map[string]string{
-			"description":     "locks the database",
-			"format":          "application/json",
-			"request_schema":  "",
-			"response_schema": schemaString(&service.ResponseMessage{}),
-		}),
-		micro.WithEndpointSubject("lock"),
-	)
-	dbGroup.AddEndpoint("unlock",
-		service.AppHandler(logger, service.Unlock, appCtx),
-		micro.WithEndpointMetadata(map[string]string{
-			"description":     "unlocks the database",
-			"format":          "application/json",
-			"request_schema":  schemaString(&service.DatabaseKey{}),
-			"response_schema": schemaString(&service.ResponseMessage{}),
-		}),
-	)
-
-	appGroup := svc.AddGroup("piggybank.secrets", micro.WithGroupQueueGroup("app"))
-	appGroup.AddEndpoint("GET",
-		service.AppHandler(logger, service.SecretHandler(service.GetRecord), appCtx),
-		micro.WithEndpointMetadata(map[string]string{
-			"description":     "Gets a secret",
-			"format":          "application/json",
-			"request_schema":  "",
-			"response_schema": schemaString(&service.ResponseMessage{}),
-		}),
-		micro.WithEndpointSubject("GET.>"),
-	)
-	appGroup.AddEndpoint("POST",
-		service.AppHandler(logger, service.SecretHandler(service.AddRecord), appCtx),
-		micro.WithEndpointMetadata(map[string]string{
-			"description":     "Adds a secret",
-			"format":          "application/json",
-			"request_schema":  "",
-			"response_schema": schemaString(&service.ResponseMessage{}),
-		}),
-		micro.WithEndpointSubject("POST.>"),
-	)
-	appGroup.AddEndpoint("DELETE",
-		service.AppHandler(logger, service.SecretHandler(service.DeleteRecord), appCtx),
-		micro.WithEndpointMetadata(map[string]string{
-			"description":     "Deletes a secret",
-			"format":          "application/json",
-			"request_schema":  "",
-			"response_schema": schemaString(&service.ResponseMessage{}),
-		}),
-		micro.WithEndpointSubject("DELETE.>"),
-	)
+	service.DBGroup(svc, logger, appCtx)
+	service.AppGroup(svc, logger, appCtx)
 
 	// uncomment to enable config watching
 	//go service.WatchForConfig(logger, js)
@@ -150,15 +79,4 @@ func start(cmd *cobra.Command, args []string) error {
 	}
 
 	return cwnats.HandleNotify(svc, health)
-
-}
-
-func schemaString(s any) string {
-	schema := jsonschema.Reflect(s)
-	data, err := schema.MarshalJSON()
-	if err != nil {
-		logr.Fatal(err)
-	}
-
-	return string(data)
 }

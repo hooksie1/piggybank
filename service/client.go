@@ -18,10 +18,10 @@ const (
 )
 
 var subjectVerbs = map[DBVerb]string{
-	DBInit:   databaseInitSubject,
-	DBLock:   databaseLockSubject,
-	DBUnlock: databaseUnlockSubject,
-	DBStatus: databaseStatusSubject,
+	DBInit:   fmt.Sprintf("%s.%s", databaseSubject, databaseInitSubject),
+	DBLock:   fmt.Sprintf("%s.%s", databaseSubject, databaseLockSubject),
+	DBUnlock: fmt.Sprintf("%s.%s", databaseSubject, databaseUnlockSubject),
+	DBStatus: fmt.Sprintf("%s.%s", databaseSubject, databaseStatusSubject),
 }
 
 type Client struct {
