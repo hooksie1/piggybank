@@ -2,7 +2,7 @@ before:
   hooks:
   - go mod tidy
   
-project_name: piggybank
+project_name: piggybankctl
 
 builds:
   - ldflags: "-extldflags= -w -X 'github.com/hooksie1/piggybank/cmd.Version={{.Tag}}-{{.ShortCommit}}'"
