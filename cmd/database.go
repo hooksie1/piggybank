@@ -1,9 +1,7 @@
 package cmd
 
 import (
-	"encoding/json"
 	"fmt"
-	"time"
 
 	"github.com/hooksie1/piggybank/service"
 	"github.com/spf13/cobra"
@@ -15,7 +13,7 @@ var databaseCmd = &cobra.Command{
 	Short:        "Interact with the piggybank db, valid args are init, lock, unlock",
 	RunE:         database,
 	Args:         cobra.MatchAll(cobra.MinimumNArgs(1), cobra.OnlyValidArgs),
-	ValidArgs:    []string{"init", "lock", "unlock"},
+	ValidArgs:    service.GetClientDBVerbs(),
 	SilenceUsage: true,
 }
 
@@ -32,41 +30,25 @@ func database(cmd *cobra.Command, args []string) error {
 	}
 	key := viper.GetString("key")
 
-	switch args[0] {
-	case "init":
-		msg, err := nc.Request("piggybank.database.initialize", nil, 1*time.Second)
-		if err != nil {
-			return err
-		}
-
-		fmt.Println(string(msg.Data))
-		return nil
-	case "unlock":
-		if key == "" {
-			return fmt.Errorf("database key required")
-		}
-
-		req := service.DatabaseKey{DBKey: key}
-
-		data, err := json.Marshal(req)
-		if err != nil {
-			return err
-		}
-		msg, err := nc.Request("piggybank.database.unlock", data, 1*time.Second)
-		if err != nil {
-			return err
-		}
-
-		fmt.Println(string(msg.Data))
-
-	case "lock":
-		msg, err := nc.Request("piggybank.database.lock", nil, 1*time.Second)
-		if err != nil {
-			return err
-		}
-
-		fmt.Println(string(msg.Data))
+	if args[0] == "unlock" && key == "" {
+		return fmt.Errorf("database key required")
 	}
+
+	client := service.Client{
+		Conn: nc,
+	}
+
+	request, err := service.NewDBRequest(service.DBVerb(args[0]), key)
+	if err != nil {
+		return err
+	}
+
+	resp, err := client.Do(request)
+	if err != nil {
+		return err
+	}
+
+	fmt.Println(resp)
 
 	return nil
 }

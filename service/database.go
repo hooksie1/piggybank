@@ -8,6 +8,13 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
+const (
+	databaseInitSubject   = "piggybank.database.initialize"
+	databaseUnlockSubject = "piggybank.database.unlock"
+	databaseLockSubject   = "piggybank.database.lock"
+	databaseStatusSubject = "piggybank.database.status"
+)
+
 type KV interface {
 	Bucket() string
 	Key() string
