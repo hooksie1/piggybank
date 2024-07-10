@@ -1,3 +1,6 @@
+# aead.dev/minisign v0.3.0
+## explicit; go 1.21
+aead.dev/minisign
 # github.com/99designs/gqlgen v0.17.43
 ## explicit; go 1.18
 github.com/99designs/gqlgen/graphql
@@ -6,15 +9,24 @@ github.com/99designs/gqlgen/graphql/executor
 # github.com/CoverWhale/coverwhale-go v1.2.1
 ## explicit; go 1.22.2
 github.com/CoverWhale/coverwhale-go/transports/nats
+# github.com/CoverWhale/gupdate v0.0.2
+## explicit; go 1.22.2
+github.com/CoverWhale/gupdate
 # github.com/CoverWhale/logr v0.0.0-20240513164108-a4fd5504b303
 ## explicit; go 1.19
 github.com/CoverWhale/logr
 # github.com/agnivade/levenshtein v1.1.1
 ## explicit; go 1.13
 github.com/agnivade/levenshtein
+# github.com/briandowns/spinner v1.23.0
+## explicit; go 1.17
+github.com/briandowns/spinner
 # github.com/cpuguy83/go-md2man/v2 v2.0.4
 ## explicit; go 1.11
 github.com/cpuguy83/go-md2man/v2/md2man
+# github.com/fatih/color v1.17.0
+## explicit; go 1.17
+github.com/fatih/color
 # github.com/fsnotify/fsnotify v1.7.0
 ## explicit; go 1.17
 github.com/fsnotify/fsnotify
@@ -42,6 +54,17 @@ github.com/klauspost/compress/flate
 # github.com/magiconair/properties v1.8.7
 ## explicit; go 1.19
 github.com/magiconair/properties
+# github.com/mattn/go-colorable v0.1.13
+## explicit; go 1.15
+github.com/mattn/go-colorable
+# github.com/mattn/go-isatty v0.0.20
+## explicit; go 1.15
+github.com/mattn/go-isatty
+# github.com/minio/selfupdate v0.6.0
+## explicit; go 1.14
+github.com/minio/selfupdate
+github.com/minio/selfupdate/internal/binarydist
+github.com/minio/selfupdate/internal/osext
 # github.com/mitchellh/mapstructure v1.5.0
 ## explicit; go 1.14
 github.com/mitchellh/mapstructure
@@ -141,7 +164,9 @@ golang.org/x/crypto/internal/alias
 golang.org/x/crypto/internal/poly1305
 golang.org/x/crypto/nacl/box
 golang.org/x/crypto/nacl/secretbox
+golang.org/x/crypto/pbkdf2
 golang.org/x/crypto/salsa20/salsa
+golang.org/x/crypto/scrypt
 # golang.org/x/exp v0.0.0-20240506185415-9bf2ced13842
 ## explicit; go 1.20
 golang.org/x/exp/constraints
@@ -156,8 +181,12 @@ golang.org/x/net/proxy
 # golang.org/x/sys v0.21.0
 ## explicit; go 1.18
 golang.org/x/sys/cpu
+golang.org/x/sys/plan9
 golang.org/x/sys/unix
 golang.org/x/sys/windows
+# golang.org/x/term v0.21.0
+## explicit; go 1.18
+golang.org/x/term
 # golang.org/x/text v0.16.0
 ## explicit; go 1.18
 golang.org/x/text/encoding
