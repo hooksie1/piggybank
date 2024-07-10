@@ -15,7 +15,7 @@ var databaseCmd = &cobra.Command{
 	Short:        "Interact with the piggybank db, valid args are init, lock, unlock",
 	RunE:         database,
 	Args:         cobra.MatchAll(cobra.MinimumNArgs(1), cobra.OnlyValidArgs),
-	ValidArgs:    []string{"init", "lock", "unlock"},
+	ValidArgs:    []string{"init", "lock", "unlock", "status"},
 	SilenceUsage: true,
 }
 
@@ -61,6 +61,13 @@ func database(cmd *cobra.Command, args []string) error {
 
 	case "lock":
 		msg, err := nc.Request("piggybank.database.lock", nil, 1*time.Second)
+		if err != nil {
+			return err
+		}
+
+		fmt.Println(string(msg.Data))
+	case "status":
+		msg, err := nc.Request("piggybank.database.status", nil, 1*time.Second)
 		if err != nil {
 			return err
 		}
