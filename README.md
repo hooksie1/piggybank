@@ -23,7 +23,7 @@ Be sure to add the KV bucket to NATS: `nats kv add piggybank`
 Permissions are defined as normal NATS subject permissions. If you have access to a subject, then you can retrieve the secrets. This means the permissions can be as granular as desired. 
 
 > [!IMPORTANT]
-> Please ensure to set proper permissions for inbox responses. It is recommended to not use the default _INBOX subject for responses and to set custom inbox prefixes. This prevents apps from listening to secrets sent on other apps inboxes.
+> Please ensure to set proper permissions for inbox responses. It is recommended to not use the default _INBOX prefix for responses and to set custom inbox prefixes. This prevents apps from listening to secrets sent on other apps inboxes.
 
 ## Client 
 
