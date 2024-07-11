@@ -2,7 +2,8 @@
 
 Piggy Bank is a secrets storage tool for applications that works with NATS. Secrets are stored encrypted in a JetStream KV and can be retrieved as long as the requestor has access to the subject.
 
-A decryption key is returned from the initialization phase. If this key is lost, all of the data is unrecoverable.
+> [!CAUTION]
+> A decryption key is returned from the initialization phase. If this key is lost, all of the data is unrecoverable.
 
 ## Add KV bucket
 
@@ -21,7 +22,24 @@ Be sure to add the KV bucket to NATS: `nats kv add piggybank`
 ## Permissions
 Permissions are defined as normal NATS subject permissions. If you have access to a subject, then you can retrieve the secrets. This means the permissions can be as granular as desired. 
 
-NOTE: Please ensure to set proper permissions for inbox responses. It is recommended to not use the default _INBOX subject for responses and to set granular inboxes for requests to piggybank.
+> [!IMPORTANT]
+> Please ensure to set proper permissions for inbox responses. It is recommended to not use the default _INBOX prefix for responses and to set custom inbox prefixes. This prevents apps from listening to secrets sent on other apps inboxes.
+
+## Client 
+
+To send requests to Piggybank you can either send NATS requests directly or use the helper client. Here's an example assuming the key for the secret is myapp.somesecret:
+
+```
+nc, _ := nats.Connect(someURL)
+
+client := service.Client{
+	Conn: nc,
+}
+
+msg, _ := client.Get("myapp.somesecret")
+
+fmt.Println(msg)
+```
 
 ## NATS Connection
 
