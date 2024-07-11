@@ -3,8 +3,8 @@ package cmd
 import (
 	"fmt"
 	"strings"
-	"time"
 
+	"github.com/hooksie1/piggybank/service"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -38,35 +38,34 @@ func secrets(cmd *cobra.Command, args []string) error {
 	}
 	id := viper.GetString("id")
 
+	client := service.Client{Conn: nc}
+
 	switch args[0] {
 	case "get":
-		subject := fmt.Sprintf("piggybank.secrets.GET.%s", id)
-		msg, err := nc.Request(subject, nil, 1*time.Second)
+		msg, err := client.Get(id)
 		if err != nil {
 			return err
 		}
 
-		fmt.Println(string(msg.Data))
+		fmt.Println(msg)
 	case "add":
 		val := viper.GetString("value")
 		if val == "" {
 			return fmt.Errorf("value flag is required to add a secret")
 		}
-		subject := fmt.Sprintf("piggybank.secrets.POST.%s", id)
-		msg, err := nc.Request(subject, []byte(val), 1*time.Second)
+		msg, err := client.Post(id, []byte(val))
 		if err != nil {
 			return err
 		}
 
-		fmt.Println(string(msg.Data))
+		fmt.Println(msg)
 	case "delete":
-		subject := fmt.Sprintf("piggybank.secrets.DELETE.%s", id)
-		msg, err := nc.Request(subject, nil, 1*time.Second)
+		msg, err := client.Delete(id)
 		if err != nil {
 			return err
 		}
 
-		fmt.Println(string(msg.Data))
+		fmt.Println(msg)
 	}
 
 	return nil

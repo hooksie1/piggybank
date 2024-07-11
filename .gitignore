@@ -1,8 +1,8 @@
 *.db
 deployment/
-piggybank
-piggybank.exe
-piggybank-darwin
+piggybankctl
+piggybankctl.exe
+piggybankctl-darwin
 piggybank*.tar.gz
 piggybank*.zip
 
