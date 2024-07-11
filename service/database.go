@@ -9,12 +9,35 @@ import (
 )
 
 const (
-	databaseSubject       = "piggybank.database"
-	databaseInitSubject   = "initialize"
-	databaseUnlockSubject = "unlock"
-	databaseLockSubject   = "lock"
-	databaseStatusSubject = "status"
+	databaseSubject              = "piggybank.database"
+	databaseInitSubject          = "initialize"
+	databaseUnlockSubject        = "unlock"
+	databaseLockSubject          = "lock"
+	databaseStatusSubject        = "status"
+	DBInit                DBVerb = "init"
+	DBLock                DBVerb = "lock"
+	DBUnlock              DBVerb = "unlock"
+	DBStatus              DBVerb = "status"
+	GET                   Verb   = "GET"
+	POST                  Verb   = "POST"
+	DELETE                Verb   = "DELETE"
+	secretSubject                = "piggybank.secrets"
 )
+
+var SubjectVerbs = map[DBVerb]string{
+	DBInit:   fmt.Sprintf("%s.%s", databaseSubject, databaseInitSubject),
+	DBLock:   fmt.Sprintf("%s.%s", databaseSubject, databaseLockSubject),
+	DBUnlock: fmt.Sprintf("%s.%s", databaseSubject, databaseUnlockSubject),
+	DBStatus: fmt.Sprintf("%s.%s", databaseSubject, databaseStatusSubject),
+}
+
+type DBVerb string
+
+type Verb string
+
+func (d DBVerb) String() string {
+	return string(d)
+}
 
 type KV interface {
 	Bucket() string
@@ -29,6 +52,10 @@ type Watcher interface {
 
 type Backend interface {
 	Watcher
+}
+
+func GetClientDBVerbs() []string {
+	return []string{DBInit.String(), DBLock.String(), DBUnlock.String(), DBStatus.String()}
 }
 
 // initialize sets the initialization key. Once this is set it does not need to be run again, unless you lose the encryption key.

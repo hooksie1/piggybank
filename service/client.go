@@ -8,22 +8,6 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
-type DBVerb string
-
-const (
-	DBInit   DBVerb = "init"
-	DBLock   DBVerb = "lock"
-	DBUnlock DBVerb = "unlock"
-	DBStatus DBVerb = "status"
-)
-
-var subjectVerbs = map[DBVerb]string{
-	DBInit:   fmt.Sprintf("%s.%s", databaseSubject, databaseInitSubject),
-	DBLock:   fmt.Sprintf("%s.%s", databaseSubject, databaseLockSubject),
-	DBUnlock: fmt.Sprintf("%s.%s", databaseSubject, databaseUnlockSubject),
-	DBStatus: fmt.Sprintf("%s.%s", databaseSubject, databaseStatusSubject),
-}
-
 type Client struct {
 	Conn *nats.Conn
 }
@@ -38,16 +22,8 @@ type Request struct {
 	Data    []byte
 }
 
-func (d DBVerb) String() string {
-	return string(d)
-}
-
-func GetClientDBVerbs() []string {
-	return []string{DBInit.String(), DBLock.String(), DBUnlock.String(), DBStatus.String()}
-}
-
 func NewDBRequest(verb DBVerb, key string) (Request, error) {
-	subject, ok := subjectVerbs[verb]
+	subject, ok := SubjectVerbs[verb]
 	if !ok {
 		return Request{}, fmt.Errorf("invalid verb")
 	}
@@ -61,6 +37,29 @@ func NewDBRequest(verb DBVerb, key string) (Request, error) {
 		Subject: subject,
 		Data:    data,
 	}, nil
+}
+
+func NewRequest(verb Verb, key string) (Request, error) {
+	subject := fmt.Sprintf("%s.%s", verb, key)
+	return Request{
+		Subject: subject,
+		Data:    nil,
+	}, nil
+}
+
+func (c *Client) Get(key string) (string, error) {
+	subject := fmt.Sprintf("%s.%s.%s", secretSubject, GET, key)
+	return c.Do(Request{Subject: subject, Data: nil})
+}
+
+func (c *Client) Post(key string, data []byte) (string, error) {
+	subject := fmt.Sprintf("%s.%s.%s", secretSubject, POST, key)
+	return c.Do(Request{Subject: subject, Data: data})
+}
+
+func (c *Client) Delete(key string) (string, error) {
+	subject := fmt.Sprintf("%s.%s.%s", secretSubject, DELETE, key)
+	return c.Do(Request{Subject: subject, Data: nil})
 }
 
 func (c *Client) Do(request Request) (string, error) {
