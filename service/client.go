@@ -22,6 +22,10 @@ type Request struct {
 	Data    []byte
 }
 
+type ResponseError struct {
+	Error string `json:"error"`
+}
+
 func NewDBRequest(verb DBVerb, key string) (Request, error) {
 	subject, ok := SubjectVerbs[verb]
 	if !ok {
@@ -66,6 +70,15 @@ func (c *Client) Do(request Request) (string, error) {
 	msg, err := c.Conn.Request(request.Subject, request.Data, 1*time.Second)
 	if err != nil {
 		return "", err
+	}
+	code := msg.Header.Get("Nats-Error-Code")
+	if code != "" {
+		var respErr ResponseError
+		fmt.Println(string(msg.Data))
+		if err := json.Unmarshal(msg.Data, &respErr); err != nil {
+			return "", err
+		}
+		return "", fmt.Errorf("status %s, details %v", code, respErr.Error)
 	}
 
 	return string(msg.Data), nil
