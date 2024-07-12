@@ -71,7 +71,7 @@ func (c *Client) Do(request Request) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	code := msg.Header.Get("Nats-Error-Code")
+	code := msg.Header.Get("Nats-Service-Error-Code")
 	if code != "" {
 		var respErr ResponseError
 		fmt.Println(string(msg.Data))
