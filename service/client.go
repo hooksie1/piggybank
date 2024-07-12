@@ -74,7 +74,6 @@ func (c *Client) Do(request Request) (string, error) {
 	code := msg.Header.Get("Nats-Service-Error-Code")
 	if code != "" {
 		var respErr ResponseError
-		fmt.Println(string(msg.Data))
 		if err := json.Unmarshal(msg.Data, &respErr); err != nil {
 			return "", err
 		}
