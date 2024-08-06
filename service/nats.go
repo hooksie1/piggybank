@@ -1,6 +1,7 @@
 package service
 
 import (
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -22,6 +23,10 @@ type AppContext struct {
 // ResponseMessage holds a response to the caller
 type ResponseMessage struct {
 	Details string `json:"details,omitempty"`
+}
+
+type RotateRequest struct {
+	CurrentKey string `json:"current_key"`
 }
 
 // SecretHandler wraps any secret handlers to check if database is currently locked
@@ -46,6 +51,27 @@ func Initialize(r micro.Request, app AppContext) error {
 		return err
 
 	}
+	return r.RespondJSON(ResponseMessage{Details: toBase64(data)})
+}
+
+func RotateKey(r micro.Request, app AppContext) error {
+	var rotateReq RotateRequest
+
+	if err := json.Unmarshal(r.Data(), &rotateReq); err != nil {
+		return NewClientError(fmt.Errorf("bad request"), 400)
+	}
+
+	if rotateReq.CurrentKey == "" {
+		return NewClientError(fmt.Errorf("current db key required"), 400)
+	}
+
+	fmt.Println(rotateReq.CurrentKey)
+
+	data, err := app.Rotate(rotateReq.CurrentKey)
+	if err != nil {
+		return err
+	}
+
 	return r.RespondJSON(ResponseMessage{Details: toBase64(data)})
 }
 

@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"crypto/aes"
 	"encoding/json"
 	"fmt"
@@ -14,10 +15,12 @@ const (
 	databaseUnlockSubject        = "unlock"
 	databaseLockSubject          = "lock"
 	databaseStatusSubject        = "status"
+	databaseRotateSubject        = "rotate"
 	DBInit                DBVerb = "init"
 	DBLock                DBVerb = "lock"
 	DBUnlock              DBVerb = "unlock"
 	DBStatus              DBVerb = "status"
+	DBRotate              DBVerb = "rotate"
 	GET                   Verb   = "GET"
 	POST                  Verb   = "POST"
 	DELETE                Verb   = "DELETE"
@@ -29,6 +32,7 @@ var SubjectVerbs = map[DBVerb]string{
 	DBLock:   fmt.Sprintf("%s.%s", databaseSubject, databaseLockSubject),
 	DBUnlock: fmt.Sprintf("%s.%s", databaseSubject, databaseUnlockSubject),
 	DBStatus: fmt.Sprintf("%s.%s", databaseSubject, databaseStatusSubject),
+	DBRotate: fmt.Sprintf("%s.%s", databaseSubject, databaseRotateSubject),
 }
 
 type DBVerb string
@@ -55,7 +59,7 @@ type Backend interface {
 }
 
 func GetClientDBVerbs() []string {
-	return []string{DBInit.String(), DBLock.String(), DBUnlock.String(), DBStatus.String()}
+	return []string{DBInit.String(), DBLock.String(), DBUnlock.String(), DBStatus.String(), DBRotate.String()}
 }
 
 // initialize sets the initialization key. Once this is set it does not need to be run again, unless you lose the encryption key.
@@ -86,6 +90,50 @@ func (a *AppContext) initialize() ([]byte, error) {
 
 	return key, nil
 
+}
+
+func (a *AppContext) Rotate(currentKey string) ([]byte, error) {
+	currentData, err := fromBase64(currentKey)
+	if err != nil {
+		return nil, NewClientError(fmt.Errorf("%v", err), 400)
+	}
+
+	if !bytes.Equal(currentData, databaseKey) {
+		return nil, NewClientError(fmt.Errorf("current database key does not match"), 401)
+	}
+
+	key := generateKey()
+
+	w, err := a.KV.WatchAll(nats.IgnoreDeletes())
+	if err != nil {
+		return nil, err
+	}
+
+	for v := range w.Updates() {
+		if v == nil {
+			break
+		}
+
+		record := NewJSRecord().SetEncryptionKey(key).SetBucket(piggyBucket).SetKey(v.Key())
+
+		data, err := a.getRecord(record)
+		if err != nil {
+			fmt.Println(err)
+			break
+		}
+
+		record.SetValue(string(data))
+
+		if err := a.addRecord(record); err != nil {
+			fmt.Println(err)
+			break
+		}
+
+	}
+
+	databaseKey = key
+
+	return []byte(key), nil
 }
 
 func (a *AppContext) Unlock(k KV) error {
