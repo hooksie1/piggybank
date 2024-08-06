@@ -76,6 +76,7 @@ func (a *AppContext) initialize() ([]byte, error) {
 		return nil, NewClientError(fmt.Errorf("database already initialized"), 400)
 	}
 
+	a.logger.Info("generating intial key")
 	key, random := generateKey(), generatePass()
 
 	record := NewJSRecord().SetEncryptionKey(key).SetBucket(piggyBucket).SetKey("init").SetValue(random)
@@ -102,6 +103,7 @@ func (a *AppContext) Rotate(currentKey string) ([]byte, error) {
 		return nil, NewClientError(fmt.Errorf("current database key does not match"), 401)
 	}
 
+	a.logger.Info("generating new key")
 	key := generateKey()
 
 	w, err := a.KV.WatchAll(nats.IgnoreDeletes())
@@ -111,6 +113,7 @@ func (a *AppContext) Rotate(currentKey string) ([]byte, error) {
 
 	for v := range w.Updates() {
 		if v == nil {
+			a.logger.Info("done updating secrets")
 			break
 		}
 
@@ -118,14 +121,14 @@ func (a *AppContext) Rotate(currentKey string) ([]byte, error) {
 
 		data, err := a.getRecord(record)
 		if err != nil {
-			fmt.Println(err)
+			a.logger.Errorf("key rotation error in getting secret %s: %v", v.Key(), err)
 			break
 		}
 
 		record.SetValue(string(data))
 
 		if err := a.addRecord(record); err != nil {
-			fmt.Println(err)
+			a.logger.Errorf("key rotation error updating secret %s: %v", v.Key(), err)
 			break
 		}
 

@@ -46,6 +46,7 @@ func Lock(r micro.Request, app AppContext) error {
 }
 
 func Initialize(r micro.Request, app AppContext) error {
+	app.logger.Info("initializing database")
 	data, err := app.initialize()
 	if err != nil {
 		return err
@@ -65,6 +66,7 @@ func RotateKey(r micro.Request, app AppContext) error {
 		return NewClientError(fmt.Errorf("current db key required"), 400)
 	}
 
+	app.logger.Info("rotating encryption key")
 	data, err := app.Rotate(rotateReq.CurrentKey)
 	if err != nil {
 		return err
@@ -93,6 +95,7 @@ func Unlock(r micro.Request, app AppContext) error {
 		return NewClientError(fmt.Errorf("database not initialized"), 400)
 	}
 
+	app.logger.Info("unlocking database")
 	if err := app.unlock(r.Data()); err != nil {
 		return err
 	}
