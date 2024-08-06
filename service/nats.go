@@ -65,8 +65,6 @@ func RotateKey(r micro.Request, app AppContext) error {
 		return NewClientError(fmt.Errorf("current db key required"), 400)
 	}
 
-	fmt.Println(rotateReq.CurrentKey)
-
 	data, err := app.Rotate(rotateReq.CurrentKey)
 	if err != nil {
 		return err
