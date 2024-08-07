@@ -110,7 +110,7 @@ func Status(r micro.Request, app AppContext) error {
 
 func GetRecord(r micro.Request, app AppContext) error {
 	record := NewJSRecord().SetBucket(piggyBucket).SetSanitizedKey(r.Subject())
-	decrypted, err := app.getRecord(record)
+	decrypted, err := app.getRecord(record, databaseKey)
 	if err != nil {
 		return err
 	}

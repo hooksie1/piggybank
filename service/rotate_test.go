@@ -5,6 +5,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/CoverWhale/logr"
 	"github.com/nats-io/nats-server/v2/server"
 	natsserver "github.com/nats-io/nats-server/v2/test"
 	"github.com/nats-io/nats.go"
@@ -14,6 +15,7 @@ var (
 	testVals = map[string]string{
 		"piggybank.secrets.secret1": "thesecret",
 		"piggybank.secrets.secret2": "other secret",
+		"piggybank.secrets.secret3": "this is another secret $@!)(*)/",
 	}
 )
 
@@ -40,8 +42,7 @@ func shutdownJSServerAndRemoveStorage(t *testing.T, s *server.Server) {
 	s.WaitForShutdown()
 }
 
-func TestRotate(t *testing.T) {
-	server := NewServer(t)
+func setupEncryptedVals(t *testing.T, server *server.Server) ([]byte, AppContext) {
 
 	// nats connection
 	nc, err := nats.Connect(server.ClientURL())
@@ -60,7 +61,8 @@ func TestRotate(t *testing.T) {
 	}
 
 	app := AppContext{
-		KV: kv,
+		KV:     kv,
+		logger: logr.NewLogger(),
 	}
 
 	key, err := app.initialize()
@@ -85,14 +87,57 @@ func TestRotate(t *testing.T) {
 		}
 	}
 
-	_, err = app.Rotate(string(key))
+	return key, app
+}
+
+func TestRotate(t *testing.T) {
+	// reset key
+	databaseKey = nil
+	server := NewServer(t)
+	defer shutdownJSServerAndRemoveStorage(t, server)
+
+	key, app := setupEncryptedVals(t, server)
+
+	_, err := app.Rotate(toBase64(key))
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	for k, v := range testVals {
 		record := NewJSRecord().SetBucket(piggyBucket).SetKey(k)
-		decrypted, err := app.getRecord(record)
+		decrypted, err := app.getRecord(record, databaseKey)
+		if err != nil {
+			t.Error(err)
+		}
+
+		if string(decrypted) != v {
+			t.Errorf("expected %s but got %s", v, string(decrypted))
+		}
+	}
+}
+
+func TestRollback(t *testing.T) {
+	// reset key
+	databaseKey = nil
+	server := NewServer(t)
+	defer shutdownJSServerAndRemoveStorage(t, server)
+
+	key, app := setupEncryptedVals(t, server)
+
+	// Change one key with bad data to cause rollback
+	record := NewJSRecord().SetEncryptionKey(generateKey()).SetBucket(piggyBucket).SetKey("piggybank.secrets.secret3").SetValue(string("other secret"))
+	if err := app.addRecord(record); err != nil {
+		t.Error(err)
+	}
+
+	_, err := app.Rotate(toBase64(key))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for k, v := range testVals {
+		record := NewJSRecord().SetBucket(piggyBucket).SetKey(k)
+		decrypted, err := app.getRecord(record, databaseKey)
 		if err != nil {
 			t.Error(err)
 		}

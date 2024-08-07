@@ -1,7 +1,6 @@
 package service
 
 import (
-	"bytes"
 	"crypto/aes"
 	"encoding/json"
 	"fmt"
@@ -93,52 +92,6 @@ func (a *AppContext) initialize() ([]byte, error) {
 
 }
 
-func (a *AppContext) Rotate(currentKey string) ([]byte, error) {
-	currentData, err := fromBase64(currentKey)
-	if err != nil {
-		return nil, NewClientError(fmt.Errorf("%v", err), 400)
-	}
-
-	if !bytes.Equal(currentData, databaseKey) {
-		return nil, NewClientError(fmt.Errorf("current database key does not match"), 401)
-	}
-
-	a.logger.Info("generating new key")
-	key := generateKey()
-
-	w, err := a.KV.WatchAll(nats.IgnoreDeletes())
-	if err != nil {
-		return nil, err
-	}
-
-	for v := range w.Updates() {
-		if v == nil {
-			a.logger.Info("done updating secrets")
-			break
-		}
-
-		record := NewJSRecord().SetEncryptionKey(key).SetBucket(piggyBucket).SetKey(v.Key())
-
-		data, err := a.getRecord(record)
-		if err != nil {
-			a.logger.Errorf("key rotation error in getting secret %s: %v", v.Key(), err)
-			break
-		}
-
-		record.SetValue(string(data))
-
-		if err := a.addRecord(record); err != nil {
-			a.logger.Errorf("key rotation error updating secret %s: %v", v.Key(), err)
-			break
-		}
-
-	}
-
-	databaseKey = key
-
-	return []byte(key), nil
-}
-
 func (a *AppContext) Unlock(k KV) error {
 	key, err := fromBase64(string(k.Value()))
 	if err != nil {
@@ -208,7 +161,7 @@ func (a *AppContext) AddRecord(k KV) error {
 }
 
 // getRecord wraps GetRecord by decrypting the returned value and handling resposnes.
-func (a *AppContext) getRecord(k KV) ([]byte, error) {
+func (a *AppContext) getRecord(k KV, decryptionKey []byte) ([]byte, error) {
 	data, err := a.GetRecord(k)
 	if err != nil && err == nats.ErrKeyNotFound {
 		return nil, NewClientError(fmt.Errorf("key not found"), 404)
@@ -218,7 +171,7 @@ func (a *AppContext) getRecord(k KV) ([]byte, error) {
 		return nil, err
 	}
 
-	decrypted, err := decrypt(data, databaseKey)
+	decrypted, err := decrypt(data, decryptionKey)
 	if err != nil {
 		return nil, err
 	}
