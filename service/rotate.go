@@ -55,9 +55,7 @@ func (a *AppContext) Rotate(currentKey string) ([]byte, error) {
 
 	updated, err := a.rotateKey(kvs)
 	if err != nil {
-		errs := a.rollbackKey(updated)
-		fmt.Println(errs)
-		return nil, nil
+		return nil, a.rollbackKey(updated)
 	}
 
 	databaseKey = newKey
@@ -65,9 +63,9 @@ func (a *AppContext) Rotate(currentKey string) ([]byte, error) {
 	return []byte(newKey), nil
 }
 
-func (a *AppContext) rollbackKey(kvs []rotatedKV) []error {
+func (a *AppContext) rollbackKey(kvs []rotatedKV) error {
+	var failedKeys []string
 	logger := a.logger.WithContext(map[string]string{"rotation_step": "rollback"})
-	var errs []error
 	for _, v := range kvs {
 		if v.rotated == true {
 			logger.Infof("rolling back secret: %s", v.subject)
@@ -76,20 +74,25 @@ func (a *AppContext) rollbackKey(kvs []rotatedKV) []error {
 			data, err := a.getRecord(record, v.newKey)
 			if err != nil {
 				logger.Errorf("error in getting secret %s: %v", v.subject, err)
+				failedKeys = append(failedKeys, v.subject)
 				continue
 			}
 
 			record.SetValue(string(data))
 
 			if err := a.addRecord(record); err != nil {
-				errs = append(errs, err)
+				failedKeys = append(failedKeys, v.subject)
 				logger.Errorf("error rolling back encryption key on secret %s: %v", v.subject, err)
 				continue
 			}
 		}
 	}
 
-	return errs
+	if len(failedKeys) > 0 {
+		return fmt.Errorf("error rolling back keys: %v", failedKeys)
+	}
+
+	return nil
 }
 
 func (a *AppContext) rotateKey(kvs []rotatedKV) ([]rotatedKV, error) {
