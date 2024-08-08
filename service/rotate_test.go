@@ -81,8 +81,13 @@ func setupEncryptedVals(t *testing.T, server *server.Server, vals map[string]str
 	}
 
 	for k, v := range vals {
-		record := NewJSRecord().SetEncryptionKey(key).SetBucket(piggyBucket).SetKey(k).SetValue(v)
-		if err := app.addRecord(record); err != nil {
+		record := JetStreamRecord{
+			encryptionKey: key,
+			bucket:        piggyBucket,
+			key:           k,
+			value:         []byte(v),
+		}
+		if err := app.addRecord(&record); err != nil {
 			t.Error(err)
 		}
 	}
@@ -129,21 +134,29 @@ func TestRotation(t *testing.T) {
 
 			// Change one key with bad data to cause rollback
 			if v.rollback {
-				record := NewJSRecord().SetEncryptionKey(generateKey()).SetBucket(piggyBucket).SetKey("piggybank.secrets.secret3").SetValue(string("other secret"))
-				if err := app.addRecord(record); err != nil {
+				record := JetStreamRecord{
+					encryptionKey: generateKey(),
+					bucket:        piggyBucket,
+					key:           "piggybank.secrets.secret3",
+					value:         []byte("other secret"),
+				}
+				if err := app.addRecord(&record); err != nil {
 					t.Error(err)
 				}
 			}
 
 			_, err := app.Rotate(toBase64(key))
-			if err != nil && v.err != false {
+			if err != nil && !v.err {
 				t.Fatal(err)
 			}
 
 			for sub, val := range v.vals {
-				record := NewJSRecord().SetBucket(piggyBucket).SetKey(sub)
-				decrypted, err := app.getRecord(record, databaseKey)
-				if err != nil && v.err != true {
+				record := JetStreamRecord{
+					bucket: piggyBucket,
+					key:    sub,
+				}
+				decrypted, err := app.getRecord(&record, databaseKey)
+				if err != nil && !v.err {
 					t.Error(err)
 				}
 

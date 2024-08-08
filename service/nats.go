@@ -77,7 +77,10 @@ func RotateKey(r micro.Request, app AppContext) error {
 
 func Unlock(r micro.Request, app AppContext) error {
 	var unlocked bool
-	kv := NewJSRecord().SetBucket(piggyBucket).SetKey("init")
+	kv := JetStreamRecord{
+		bucket: piggyBucket,
+		key:    "init",
+	}
 	if databaseKey != nil {
 		unlocked = true
 	}
@@ -86,7 +89,7 @@ func Unlock(r micro.Request, app AppContext) error {
 		return NewClientError(fmt.Errorf("database already unlocked"), 400)
 	}
 
-	_, err := app.GetRecord(kv)
+	_, err := app.GetRecord(&kv)
 	if err != nil && err != nats.ErrKeyNotFound {
 		return err
 	}
@@ -109,8 +112,11 @@ func Status(r micro.Request, app AppContext) error {
 }
 
 func GetRecord(r micro.Request, app AppContext) error {
-	record := NewJSRecord().SetBucket(piggyBucket).SetSanitizedKey(r.Subject())
-	decrypted, err := app.getRecord(record, databaseKey)
+	record := JetStreamRecord{
+		bucket: piggyBucket,
+		key:    SanitizeKey(r.Subject()),
+	}
+	decrypted, err := app.getRecord(&record, databaseKey)
 	if err != nil {
 		return err
 	}
@@ -119,10 +125,14 @@ func GetRecord(r micro.Request, app AppContext) error {
 }
 
 func AddRecord(r micro.Request, app AppContext) error {
-	record := NewJSRecord().SetBucket(piggyBucket).SetSanitizedKey(r.Subject())
-	record.SetValue(string(r.Data()))
-	record.SetEncryptionKey(databaseKey)
-	if err := app.addRecord(record); err != nil {
+	record := JetStreamRecord{
+		bucket:        piggyBucket,
+		key:           SanitizeKey(r.Subject()),
+		value:         r.Data(),
+		encryptionKey: databaseKey,
+	}
+
+	if err := app.addRecord(&record); err != nil {
 		return err
 	}
 
@@ -130,8 +140,11 @@ func AddRecord(r micro.Request, app AppContext) error {
 }
 
 func DeleteRecord(r micro.Request, app AppContext) error {
-	record := NewJSRecord().SetBucket(piggyBucket).SetSanitizedKey(r.Subject())
-	if err := app.deleteRecord(record); err != nil {
+	record := JetStreamRecord{
+		bucket: piggyBucket,
+		key:    SanitizeKey(r.Subject()),
+	}
+	if err := app.deleteRecord(&record); err != nil {
 		return err
 	}
 

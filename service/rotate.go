@@ -69,18 +69,22 @@ func (a *AppContext) rollbackKey(kvs []rotatedKV) error {
 	for _, v := range kvs {
 		if v.rotated == true {
 			logger.Infof("rolling back secret: %s", v.subject)
-			record := NewJSRecord().SetEncryptionKey(v.oldKey).SetBucket(piggyBucket).SetKey(v.subject)
 
-			data, err := a.getRecord(record, v.newKey)
+			decrypted, err := decrypt(v.value, v.oldKey)
 			if err != nil {
 				logger.Errorf("error in getting secret %s: %v", v.subject, err)
 				failedKeys = append(failedKeys, v.subject)
 				continue
 			}
 
-			record.SetValue(string(data))
+			record := JetStreamRecord{
+				encryptionKey: v.oldKey,
+				bucket:        piggyBucket,
+				key:           v.subject,
+				value:         decrypted,
+			}
 
-			if err := a.addRecord(record); err != nil {
+			if err := a.addRecord(&record); err != nil {
 				failedKeys = append(failedKeys, v.subject)
 				logger.Errorf("error rolling back encryption key on secret %s: %v", v.subject, err)
 				continue
@@ -100,17 +104,20 @@ func (a *AppContext) rotateKey(kvs []rotatedKV) ([]rotatedKV, error) {
 	for k, v := range kvs {
 		logger.Infof("re-encrypting secret %s", v.subject)
 
-		record := NewJSRecord().SetEncryptionKey(v.newKey).SetBucket(piggyBucket).SetKey(v.subject).SetValue(string(v.value))
-
-		data, err := a.getRecord(record, v.oldKey)
+		decrypted, err := decrypt(v.value, v.oldKey)
 		if err != nil {
 			logger.Errorf("key rotation error in getting secret %s: %v", v.subject, err)
 			return kvs, err
 		}
 
-		record.SetValue(string(data))
+		record := JetStreamRecord{
+			encryptionKey: v.newKey,
+			bucket:        piggyBucket,
+			key:           v.subject,
+			value:         decrypted,
+		}
 
-		if err := a.addRecord(record); err != nil {
+		if err := a.addRecord(&record); err != nil {
 			logger.Errorf("key rotation error updating secret %s: %v", v.subject, err)
 			return kvs, err
 		}
