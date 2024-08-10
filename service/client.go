@@ -22,10 +22,6 @@ type Request struct {
 	Data    []byte
 }
 
-type SecretResponse struct {
-	Details string `json:"details"`
-}
-
 type ResponseError struct {
 	Error string `json:"error"`
 }

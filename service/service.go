@@ -39,6 +39,14 @@ func DBGroup(svc micro.Service, logger *logr.Logger, appCtx AppContext) {
 		}),
 		micro.WithEndpointSubject(databaseUnlockSubject),
 	)
+	dbGroup.AddEndpoint("rotate",
+		AppHandler(logger, RotateKey, appCtx),
+		micro.WithEndpointMetadata(map[string]string{
+			"description": "rotates the database encryption key",
+			"format":      "application/json",
+		}),
+		micro.WithEndpointSubject(databaseRotateSubject),
+	)
 }
 
 func AppGroup(svc micro.Service, logger *logr.Logger, appCtx AppContext) {

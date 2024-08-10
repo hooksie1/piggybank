@@ -14,10 +14,12 @@ const (
 	databaseUnlockSubject        = "unlock"
 	databaseLockSubject          = "lock"
 	databaseStatusSubject        = "status"
+	databaseRotateSubject        = "rotate"
 	DBInit                DBVerb = "init"
 	DBLock                DBVerb = "lock"
 	DBUnlock              DBVerb = "unlock"
 	DBStatus              DBVerb = "status"
+	DBRotate              DBVerb = "rotate"
 	GET                   Verb   = "GET"
 	POST                  Verb   = "POST"
 	DELETE                Verb   = "DELETE"
@@ -29,6 +31,7 @@ var SubjectVerbs = map[DBVerb]string{
 	DBLock:   fmt.Sprintf("%s.%s", databaseSubject, databaseLockSubject),
 	DBUnlock: fmt.Sprintf("%s.%s", databaseSubject, databaseUnlockSubject),
 	DBStatus: fmt.Sprintf("%s.%s", databaseSubject, databaseStatusSubject),
+	DBRotate: fmt.Sprintf("%s.%s", databaseSubject, databaseRotateSubject),
 }
 
 type DBVerb string
@@ -55,15 +58,18 @@ type Backend interface {
 }
 
 func GetClientDBVerbs() []string {
-	return []string{DBInit.String(), DBLock.String(), DBUnlock.String(), DBStatus.String()}
+	return []string{DBInit.String(), DBLock.String(), DBUnlock.String(), DBStatus.String(), DBRotate.String()}
 }
 
 // initialize sets the initialization key. Once this is set it does not need to be run again, unless you lose the encryption key.
 // If you lose the encryption key, everything is lost.
 func (a *AppContext) initialize() ([]byte, error) {
-	kv := NewJSRecord().SetBucket(piggyBucket).SetKey("init")
+	kv := JetStreamRecord{
+		bucket: piggyBucket,
+		key:    "init",
+	}
 
-	_, err := a.GetRecord(kv)
+	_, err := a.GetRecord(&kv)
 	if err != nil && err != nats.ErrKeyNotFound {
 		return nil, err
 	}
@@ -72,15 +78,21 @@ func (a *AppContext) initialize() ([]byte, error) {
 		return nil, NewClientError(fmt.Errorf("database already initialized"), 400)
 	}
 
+	a.logger.Info("generating intial key")
 	key, random := generateKey(), generatePass()
 
-	record := NewJSRecord().SetEncryptionKey(key).SetBucket(piggyBucket).SetKey("init").SetValue(random)
+	record := JetStreamRecord{
+		encryptionKey: key,
+		bucket:        piggyBucket,
+		key:           "init",
+		value:         []byte(random),
+	}
 
 	if err := record.Encrypt(); err != nil {
 		return nil, err
 	}
 
-	if err := a.AddRecord(record); err != nil {
+	if err := a.AddRecord(&record); err != nil {
 		return nil, err
 	}
 
@@ -124,9 +136,13 @@ func (a *AppContext) unlock(data []byte) error {
 		return NewClientError(fmt.Errorf("key is too short"), 400)
 	}
 
-	kv := NewJSRecord().SetBucket(piggyBucket).SetKey("init").SetValue(key.DBKey)
+	kv := JetStreamRecord{
+		bucket: piggyBucket,
+		key:    "init",
+		value:  []byte(key.DBKey),
+	}
 
-	if err := a.Unlock(kv); err != nil {
+	if err := a.Unlock(&kv); err != nil {
 		return fmt.Errorf("error unlocking database: %v", err)
 	}
 
@@ -157,7 +173,7 @@ func (a *AppContext) AddRecord(k KV) error {
 }
 
 // getRecord wraps GetRecord by decrypting the returned value and handling resposnes.
-func (a *AppContext) getRecord(k KV) ([]byte, error) {
+func (a *AppContext) getRecord(k KV, decryptionKey []byte) ([]byte, error) {
 	data, err := a.GetRecord(k)
 	if err != nil && err == nats.ErrKeyNotFound {
 		return nil, NewClientError(fmt.Errorf("key not found"), 404)
@@ -167,7 +183,7 @@ func (a *AppContext) getRecord(k KV) ([]byte, error) {
 		return nil, err
 	}
 
-	decrypted, err := decrypt(data, databaseKey)
+	decrypted, err := decrypt(data, decryptionKey)
 	if err != nil {
 		return nil, err
 	}

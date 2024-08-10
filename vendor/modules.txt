@@ -51,6 +51,8 @@ github.com/inconshreveable/mousetrap
 # github.com/klauspost/compress v1.17.7
 ## explicit; go 1.20
 github.com/klauspost/compress/flate
+github.com/klauspost/compress/internal/race
+github.com/klauspost/compress/s2
 # github.com/magiconair/properties v1.8.7
 ## explicit; go 1.19
 github.com/magiconair/properties
@@ -60,6 +62,9 @@ github.com/mattn/go-colorable
 # github.com/mattn/go-isatty v0.0.20
 ## explicit; go 1.15
 github.com/mattn/go-isatty
+# github.com/minio/highwayhash v1.0.2
+## explicit; go 1.15
+github.com/minio/highwayhash
 # github.com/minio/selfupdate v0.6.0
 ## explicit; go 1.14
 github.com/minio/selfupdate
@@ -71,6 +76,23 @@ github.com/mitchellh/mapstructure
 # github.com/nats-io/jsm.go v0.1.1
 ## explicit; go 1.21
 github.com/nats-io/jsm.go/natscontext
+# github.com/nats-io/jwt/v2 v2.5.5
+## explicit; go 1.18
+github.com/nats-io/jwt/v2
+# github.com/nats-io/nats-server/v2 v2.10.12
+## explicit; go 1.20
+github.com/nats-io/nats-server/v2/conf
+github.com/nats-io/nats-server/v2/internal/fastrand
+github.com/nats-io/nats-server/v2/internal/ldap
+github.com/nats-io/nats-server/v2/logger
+github.com/nats-io/nats-server/v2/server
+github.com/nats-io/nats-server/v2/server/avl
+github.com/nats-io/nats-server/v2/server/certidp
+github.com/nats-io/nats-server/v2/server/certstore
+github.com/nats-io/nats-server/v2/server/pse
+github.com/nats-io/nats-server/v2/server/stree
+github.com/nats-io/nats-server/v2/server/sysmem
+github.com/nats-io/nats-server/v2/test
 # github.com/nats-io/nats.go v1.36.0
 ## explicit; go 1.20
 github.com/nats-io/nats.go
@@ -157,6 +179,10 @@ go.uber.org/multierr
 golang.org/x/crypto/bcrypt
 golang.org/x/crypto/blake2b
 golang.org/x/crypto/blowfish
+golang.org/x/crypto/chacha20
+golang.org/x/crypto/chacha20poly1305
+golang.org/x/crypto/cryptobyte
+golang.org/x/crypto/cryptobyte/asn1
 golang.org/x/crypto/curve25519
 golang.org/x/crypto/curve25519/internal/field
 golang.org/x/crypto/ed25519
@@ -164,6 +190,7 @@ golang.org/x/crypto/internal/alias
 golang.org/x/crypto/internal/poly1305
 golang.org/x/crypto/nacl/box
 golang.org/x/crypto/nacl/secretbox
+golang.org/x/crypto/ocsp
 golang.org/x/crypto/pbkdf2
 golang.org/x/crypto/salsa20/salsa
 golang.org/x/crypto/scrypt
@@ -184,6 +211,10 @@ golang.org/x/sys/cpu
 golang.org/x/sys/plan9
 golang.org/x/sys/unix
 golang.org/x/sys/windows
+golang.org/x/sys/windows/registry
+golang.org/x/sys/windows/svc
+golang.org/x/sys/windows/svc/eventlog
+golang.org/x/sys/windows/svc/mgr
 # golang.org/x/term v0.21.0
 ## explicit; go 1.18
 golang.org/x/term
@@ -197,6 +228,9 @@ golang.org/x/text/internal/utf8internal
 golang.org/x/text/runes
 golang.org/x/text/transform
 golang.org/x/text/unicode/norm
+# golang.org/x/time v0.5.0
+## explicit; go 1.18
+golang.org/x/time/rate
 # gopkg.in/ini.v1 v1.67.0
 ## explicit
 gopkg.in/ini.v1

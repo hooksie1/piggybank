@@ -1,6 +1,7 @@
 package service
 
 import (
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -24,6 +25,10 @@ type ResponseMessage struct {
 	Details string `json:"details,omitempty"`
 }
 
+type RotateRequest struct {
+	CurrentKey string `json:"current_key"`
+}
+
 // SecretHandler wraps any secret handlers to check if database is currently locked
 func SecretHandler(a AppHandlerFunc) AppHandlerFunc {
 	return func(r micro.Request, app AppContext) error {
@@ -41,6 +46,7 @@ func Lock(r micro.Request, app AppContext) error {
 }
 
 func Initialize(r micro.Request, app AppContext) error {
+	app.logger.Info("initializing database")
 	data, err := app.initialize()
 	if err != nil {
 		return err
@@ -49,9 +55,32 @@ func Initialize(r micro.Request, app AppContext) error {
 	return r.RespondJSON(ResponseMessage{Details: toBase64(data)})
 }
 
+func RotateKey(r micro.Request, app AppContext) error {
+	var rotateReq RotateRequest
+
+	if err := json.Unmarshal(r.Data(), &rotateReq); err != nil {
+		return NewClientError(fmt.Errorf("bad request"), 400)
+	}
+
+	if rotateReq.CurrentKey == "" {
+		return NewClientError(fmt.Errorf("current db key required"), 400)
+	}
+
+	app.logger.Info("rotating encryption key")
+	data, err := app.Rotate(rotateReq.CurrentKey)
+	if err != nil {
+		return err
+	}
+
+	return r.RespondJSON(ResponseMessage{Details: toBase64(data)})
+}
+
 func Unlock(r micro.Request, app AppContext) error {
 	var unlocked bool
-	kv := NewJSRecord().SetBucket(piggyBucket).SetKey("init")
+	kv := JetStreamRecord{
+		bucket: piggyBucket,
+		key:    "init",
+	}
 	if databaseKey != nil {
 		unlocked = true
 	}
@@ -60,7 +89,7 @@ func Unlock(r micro.Request, app AppContext) error {
 		return NewClientError(fmt.Errorf("database already unlocked"), 400)
 	}
 
-	_, err := app.GetRecord(kv)
+	_, err := app.GetRecord(&kv)
 	if err != nil && err != nats.ErrKeyNotFound {
 		return err
 	}
@@ -69,6 +98,7 @@ func Unlock(r micro.Request, app AppContext) error {
 		return NewClientError(fmt.Errorf("database not initialized"), 400)
 	}
 
+	app.logger.Info("unlocking database")
 	if err := app.unlock(r.Data()); err != nil {
 		return err
 	}
@@ -82,8 +112,11 @@ func Status(r micro.Request, app AppContext) error {
 }
 
 func GetRecord(r micro.Request, app AppContext) error {
-	record := NewJSRecord().SetBucket(piggyBucket).SetSanitizedKey(r.Subject())
-	decrypted, err := app.getRecord(record)
+	record := JetStreamRecord{
+		bucket: piggyBucket,
+		key:    SanitizeKey(r.Subject()),
+	}
+	decrypted, err := app.getRecord(&record, databaseKey)
 	if err != nil {
 		return err
 	}
@@ -92,10 +125,14 @@ func GetRecord(r micro.Request, app AppContext) error {
 }
 
 func AddRecord(r micro.Request, app AppContext) error {
-	record := NewJSRecord().SetBucket(piggyBucket).SetSanitizedKey(r.Subject())
-	record.SetValue(string(r.Data()))
-	record.SetEncryptionKey(databaseKey)
-	if err := app.addRecord(record); err != nil {
+	record := JetStreamRecord{
+		bucket:        piggyBucket,
+		key:           SanitizeKey(r.Subject()),
+		value:         r.Data(),
+		encryptionKey: databaseKey,
+	}
+
+	if err := app.addRecord(&record); err != nil {
 		return err
 	}
 
@@ -103,8 +140,11 @@ func AddRecord(r micro.Request, app AppContext) error {
 }
 
 func DeleteRecord(r micro.Request, app AppContext) error {
-	record := NewJSRecord().SetBucket(piggyBucket).SetSanitizedKey(r.Subject())
-	if err := app.deleteRecord(record); err != nil {
+	record := JetStreamRecord{
+		bucket: piggyBucket,
+		key:    SanitizeKey(r.Subject()),
+	}
+	if err := app.deleteRecord(&record); err != nil {
 		return err
 	}
 
