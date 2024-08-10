@@ -80,5 +80,10 @@ func (c *Client) Do(request Request) (string, error) {
 		return "", fmt.Errorf("status %s, details %v", code, respErr.Error)
 	}
 
-	return string(msg.Data), nil
+	var resp ResponseMessage
+	if err := json.Unmarshal(msg.Data, &resp); err != nil {
+		return "", err
+	}
+
+	return resp.Details, nil
 }
