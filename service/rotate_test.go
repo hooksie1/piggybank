@@ -16,6 +16,7 @@ var (
 		"piggybank.secrets.secret1": "thesecret",
 		"piggybank.secrets.secret2": "other secret",
 		"piggybank.secrets.secret3": "this is another secret $@!)(*)/",
+		"piggybank.secrets.secret4": "piggybank rules",
 	}
 )
 
@@ -119,6 +120,7 @@ func TestRotation(t *testing.T) {
 				"piggybank.secrets.secret1": "thesecret",
 				"piggybank.secrets.secret2": "other secret",
 				"piggybank.secrets.secret3": "",
+				"piggybank.secrets.secret4": "piggybank rules",
 			},
 			err: true,
 		},
@@ -150,7 +152,7 @@ func TestRotation(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			for sub, val := range v.vals {
+			for sub := range v.vals {
 				record := JetStreamRecord{
 					bucket: piggyBucket,
 					key:    sub,
@@ -161,7 +163,7 @@ func TestRotation(t *testing.T) {
 				}
 
 				if string(decrypted) != v.expected[sub] {
-					t.Errorf("expected %s but got %s", val, string(decrypted))
+					t.Errorf("expected %s but got %s", v.expected[sub], string(decrypted))
 				}
 			}
 
