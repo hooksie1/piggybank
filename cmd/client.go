@@ -13,8 +13,10 @@ var clientCmd = &cobra.Command{
 func init() {
 	rootCmd.AddCommand(clientCmd)
 	natsFlags(clientCmd)
+	clientFlags(clientCmd)
 }
 
 func bindClientCmdFlags(cmd *cobra.Command, args []string) {
 	bindNatsFlags(cmd)
+	bindClientFlags(cmd)
 }

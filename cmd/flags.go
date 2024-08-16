@@ -31,6 +31,14 @@ func natsFlags(cmd *cobra.Command) {
 	cmd.PersistentFlags().Bool("use-traffic-shaping", false, "Local development connection")
 }
 
+func bindClientFlags(cmd *cobra.Command) {
+	viper.BindPFlag("inbox_prefix", cmd.Flags().Lookup("inbox-prefix"))
+}
+
+func clientFlags(cmd *cobra.Command) {
+	cmd.PersistentFlags().String("inbox-prefix", "PIGGYBANK.ADMIN", "subject prefix for replies")
+}
+
 // bindServiceFlags binds the secret flag values to viper
 func bindServiceFlags(cmd *cobra.Command) {
 	viper.BindPFlag("port", cmd.Flags().Lookup("port"))
