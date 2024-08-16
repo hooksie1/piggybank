@@ -10,7 +10,7 @@ import (
 )
 
 func newNatsConnection(name string) (*nats.Conn, error) {
-	opts := []nats.Option{nats.Name(name)}
+	opts := []nats.Option{nats.Name(name), nats.CustomInboxPrefix(viper.GetString("inbox_prefix"))}
 
 	_, ok := os.LookupEnv("USER")
 
