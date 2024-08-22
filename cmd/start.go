@@ -6,6 +6,7 @@ import (
 	cwnats "github.com/CoverWhale/coverwhale-go/transports/nats"
 	"github.com/CoverWhale/logr"
 	"github.com/hooksie1/piggybank/service"
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/micro"
 	"github.com/spf13/cobra"
 )
@@ -75,7 +76,9 @@ func start(cmd *cobra.Command, args []string) error {
 
 	health := func(ch chan<- string, s micro.Service) {
 		a := <-nc.StatusChanged()
-		ch <- fmt.Sprintf("%s %s", a.String(), nc.LastError())
+		if a == nats.CLOSED {
+			ch <- fmt.Sprintf("%s last error: %v", a.String(), nc.LastError())
+		}
 	}
 
 	return cwnats.HandleNotify(svc, health)
