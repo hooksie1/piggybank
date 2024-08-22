@@ -24,7 +24,11 @@ func init() {
 }
 
 func database(cmd *cobra.Command, args []string) error {
-	nc, err := newNatsConnection("piggy-client")
+	opts := natsOpts{
+		name:   "piggy-client",
+		prefix: viper.GetString("inbox_prefix"),
+	}
+	nc, err := newNatsConnection(opts)
 	if err != nil {
 		return err
 	}

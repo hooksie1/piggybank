@@ -32,7 +32,11 @@ func start(cmd *cobra.Command, args []string) error {
 		Description: "Secrets storage for NATS",
 	}
 
-	nc, err := newNatsConnection("piggybank-server")
+	opts := natsOpts{
+		name: "piggybank-server",
+	}
+
+	nc, err := newNatsConnection(opts)
 	if err != nil {
 		return err
 	}
