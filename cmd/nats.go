@@ -9,8 +9,17 @@ import (
 	"github.com/spf13/viper"
 )
 
-func newNatsConnection(name string) (*nats.Conn, error) {
-	opts := []nats.Option{nats.Name(name), nats.CustomInboxPrefix(viper.GetString("inbox_prefix"))}
+type natsOpts struct {
+	name   string
+	prefix string
+}
+
+func newNatsConnection(connOpts natsOpts) (*nats.Conn, error) {
+	opts := []nats.Option{nats.Name(connOpts.name)}
+
+	if connOpts.prefix != "" {
+		opts = append(opts, nats.CustomInboxPrefix(connOpts.prefix))
+	}
 
 	_, ok := os.LookupEnv("USER")
 

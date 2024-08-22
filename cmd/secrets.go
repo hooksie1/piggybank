@@ -32,7 +32,11 @@ func getSubject(verb string, id string) string {
 }
 
 func secrets(cmd *cobra.Command, args []string) error {
-	nc, err := newNatsConnection("piggy-client")
+	opts := natsOpts{
+		name:   "piggy-client",
+		prefix: viper.GetString("inbox_prefix"),
+	}
+	nc, err := newNatsConnection(opts)
 	if err != nil {
 		return err
 	}
