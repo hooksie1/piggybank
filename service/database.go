@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	databaseSubject              = "piggybank.database"
+	databaseSubject              = "nex.piggybank.database"
 	databaseInitSubject          = "initialize"
 	databaseUnlockSubject        = "unlock"
 	databaseLockSubject          = "lock"
@@ -23,7 +23,7 @@ const (
 	GET                   Verb   = "GET"
 	POST                  Verb   = "POST"
 	DELETE                Verb   = "DELETE"
-	secretSubject                = "piggybank.secrets"
+	secretSubject                = "nex.piggybank.secrets"
 )
 
 var SubjectVerbs = map[DBVerb]string{

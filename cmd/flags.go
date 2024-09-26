@@ -14,12 +14,11 @@ import (
 
 // bindNatsFlags binds nats flag values to viper
 func bindNatsFlags(cmd *cobra.Command) {
-	viper.BindPFlag("nats_urls", cmd.Flags().Lookup("nats-urls"))
-	viper.BindPFlag("nats_seed", cmd.Flags().Lookup("nats-seed"))
-	viper.BindPFlag("nats_jwt", cmd.Flags().Lookup("nats-jwt"))
+	viper.BindPFlag("nats_server", cmd.Flags().Lookup("nats-urls"))
+	viper.BindPFlag("nats_user_seed", cmd.Flags().Lookup("nats-seed"))
+	viper.BindPFlag("nats_user_jwt", cmd.Flags().Lookup("nats-jwt"))
 	viper.BindPFlag("nats_secret", cmd.Flags().Lookup("nats-secret"))
 	viper.BindPFlag("credentials_file", cmd.Flags().Lookup("credentials-file"))
-	viper.BindPFlag("use_traffic_shaping", cmd.Flags().Lookup("use-traffic-shaping"))
 }
 
 // natsFlags adds the nats flags to the passed in cobra command
@@ -28,7 +27,6 @@ func natsFlags(cmd *cobra.Command) {
 	cmd.PersistentFlags().String("nats-seed", "", "NATS seed as a string")
 	cmd.PersistentFlags().String("credentials-file", "", "Path to NATS user credentials file")
 	cmd.PersistentFlags().String("nats-urls", "nats://localhost:4222", "NATS URLs")
-	cmd.PersistentFlags().Bool("use-traffic-shaping", false, "Local development connection")
 }
 
 func bindClientFlags(cmd *cobra.Command) {

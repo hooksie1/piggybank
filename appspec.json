@@ -1,0 +1,16 @@
+{
+        "name": "piggybank-nex",
+        "version": "0.1.1",
+        "description": "A secrets storage tool",
+        "components": [
+                {
+                        "name": "piggybank-service",
+                        "workload_type": "native",
+                        "placement_policy": {
+                          "policy_name": "fixed_scale",
+                          "instances": 1,
+                          "regions": []
+                        }
+                }
+        ]
+}

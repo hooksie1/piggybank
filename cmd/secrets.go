@@ -28,7 +28,7 @@ func init() {
 }
 
 func getSubject(verb string, id string) string {
-	return fmt.Sprintf("piggybank.secrets.%s.%s", strings.ToUpper(verb), id)
+	return fmt.Sprintf("nex.piggybank.secrets.%s.%s", strings.ToUpper(verb), id)
 }
 
 func secrets(cmd *cobra.Command, args []string) error {

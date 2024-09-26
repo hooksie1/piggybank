@@ -50,7 +50,7 @@ func DBGroup(svc micro.Service, logger *logr.Logger, appCtx AppContext) {
 }
 
 func AppGroup(svc micro.Service, logger *logr.Logger, appCtx AppContext) {
-	appGroup := svc.AddGroup("piggybank.secrets", micro.WithGroupQueueGroup("app"))
+	appGroup := svc.AddGroup(secretSubject, micro.WithGroupQueueGroup("app"))
 	appGroup.AddEndpoint("GET",
 		AppHandler(logger, SecretHandler(GetRecord), appCtx),
 		micro.WithEndpointMetadata(map[string]string{

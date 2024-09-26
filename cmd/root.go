@@ -15,6 +15,7 @@ var cfg Config
 var rootCmd = &cobra.Command{
 	Use:   "piggybankctl",
 	Short: "The app description",
+	RunE:  start,
 }
 var replacer = strings.NewReplacer("-", "_")
 
@@ -32,34 +33,15 @@ func Execute() {
 
 func init() {
 	cobra.OnInitialize(initConfig)
-	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.piggybank.json)")
-	rootCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
 }
 
 func initConfig() {
 
-	if cfgFile != "" {
-		viper.SetConfigFile(cfgFile)
-	} else {
-		home, err := os.UserHomeDir()
-		cobra.CheckErr(err)
-
-		viper.AddConfigPath(home)
-		viper.SetConfigType("json")
-		viper.SetConfigName(".piggybank")
-	}
-
-	viper.SetEnvPrefix("piggybank")
+	viper.SetEnvPrefix("nex_hostservices")
 	viper.AutomaticEnv()
 	viper.SetEnvKeyReplacer(replacer)
 
 	// If a config file is found, read it in.
 	logger := logr.NewLogger()
-	if err := viper.ReadInConfig(); err == nil {
-		logger.Debugf("using config %s", viper.ConfigFileUsed())
-	}
-
-	if err := viper.Unmarshal(&cfg); err != nil {
-		cobra.CheckErr(err)
-	}
+	logger.Debug("initialized")
 }
