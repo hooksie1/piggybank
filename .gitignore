@@ -6,5 +6,6 @@ piggybankctl-darwin
 piggybank*.tar.gz
 piggybank*.zip
 fly.toml
+piggybank/
 
 dist/

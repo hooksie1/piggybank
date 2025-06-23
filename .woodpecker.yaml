@@ -1,0 +1,6 @@
+steps:
+  - name: test
+    image: cgr.dev/chainguard/go:latest
+    commands:
+      - make test
+

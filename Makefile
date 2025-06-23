@@ -36,6 +36,9 @@ fmt: ## Format All files
 piggybankctl: ## Builds the binary on the current platform
 	go build -mod=vendor -a -ldflags "-w -X '$(PKG)/cmd.Version=$(VERSION)'" -o $(PROJECT_NAME)ctl
 
+linux: ## Builds the binary on the current platform
+	GOOS=linux go build -mod=vendor -a -ldflags "-w -X '$(PKG)/cmd.Version=$(VERSION)'" -o $(PROJECT_NAME)ctl
+
 docs: ## Builds the cli documentation
 	mkdir -p docs
 	./piggybankctl docs
