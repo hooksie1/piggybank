@@ -38,15 +38,3 @@ func bindClientFlags(cmd *cobra.Command) {
 func clientFlags(cmd *cobra.Command) {
 	cmd.PersistentFlags().String("inbox-prefix", "PIGGYBANK.ADMIN", "subject prefix for replies")
 }
-
-// bindServiceFlags binds the secret flag values to viper
-func bindServiceFlags(cmd *cobra.Command) {
-	viper.BindPFlag("port", cmd.Flags().Lookup("port"))
-	viper.BindPFlag("tempo_url", cmd.Flags().Lookup("tempo-url"))
-}
-
-// sererFlags adds the service flags to the passed in command
-func serviceFlags(cmd *cobra.Command) {
-	cmd.PersistentFlags().IntP("port", "p", 8080, "Server port")
-	cmd.PersistentFlags().String("tempo-url", "", "URL for Tempo")
-}
