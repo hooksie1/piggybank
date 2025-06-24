@@ -6,5 +6,6 @@ steps:
   - name: test
     image: cgr.dev/chainguard/go:latest
     commands:
+      - export PATH=$PATH:/root/go/bin
       - make test
 
