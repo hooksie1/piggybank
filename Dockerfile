@@ -10,6 +10,5 @@ RUN CGO_ENABLED=0 GOOS=linux go build -mod=vendor -a -ldflags="-s -w -X 'github.
 FROM cgr.dev/chainguard/static
 
 COPY --from=builder /app/piggybankctl .
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 
 ENTRYPOINT ["./piggybankctl"]    
