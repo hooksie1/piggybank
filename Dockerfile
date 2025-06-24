@@ -1,4 +1,4 @@
-FROM golang:alpine as builder
+FROM cgr.dev/chainguard/go:latest-dev as builder
 WORKDIR /app
 ENV IMAGE_TAG=dev
 RUN apk update && apk upgrade && apk add --no-cache ca-certificates git
@@ -7,7 +7,7 @@ ADD . /app/
 RUN CGO_ENABLED=0 GOOS=linux go build -mod=vendor -a -ldflags="-s -w -X 'github.com/hooksie1/piggybank/cmd.Version=$(printf $(git describe --tags | cut -d '-' -f 1)-$(git rev-parse --short HEAD))'" -installsuffix cgo -o piggybankctl .
 
 
-FROM scratch
+FROM cgr.dev/chainguard/static
 
 COPY --from=builder /app/piggybankctl .
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
