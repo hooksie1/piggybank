@@ -21,6 +21,14 @@ var (
 	Null  = &lit{nullLit}
 	True  = &lit{trueLit}
 	False = &lit{falseLit}
+
+	// RequiredNull is a sentinel Marshaler that serializes to "null" just
+	// like Null, but is a distinct pointer value. It is returned by
+	// resolveField when a field was marked as non-null at runtime (via
+	// MarkNonNull) and resolved to nil. The generated object-dispatching
+	// code checks for this value to trigger null propagation for nullable
+	// fields that are semantically required.
+	RequiredNull = &lit{nullLit}
 )
 
 type Marshaler interface {
@@ -28,7 +36,7 @@ type Marshaler interface {
 }
 
 type Unmarshaler interface {
-	UnmarshalGQL(v interface{}) error
+	UnmarshalGQL(v any) error
 }
 
 type ContextMarshaler interface {
@@ -36,7 +44,7 @@ type ContextMarshaler interface {
 }
 
 type ContextUnmarshaler interface {
-	UnmarshalGQLContext(ctx context.Context, v interface{}) error
+	UnmarshalGQLContext(ctx context.Context, v any) error
 }
 
 type contextMarshalerAdapter struct {

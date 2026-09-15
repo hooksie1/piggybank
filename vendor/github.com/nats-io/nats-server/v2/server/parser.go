@@ -1,4 +1,4 @@
-// Copyright 2012-2020 The NATS Authors
+// Copyright 2012-2025 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -32,23 +32,26 @@ type parseState struct {
 	msgBuf  []byte
 	header  http.Header // access via getHeader
 	scratch [MAX_CONTROL_LINE_SIZE]byte
+	argsa   [MAX_HMSG_ARGS + 1][]byte // pre-allocated args array to avoid per-call heap escape
 }
 
 type pubArg struct {
-	arg     []byte
-	pacache []byte
-	origin  []byte
-	account []byte
-	subject []byte
-	deliver []byte
-	mapped  []byte
-	reply   []byte
-	szb     []byte
-	hdb     []byte
-	queues  [][]byte
-	size    int
-	hdr     int
-	psi     []*serviceImport
+	arg       []byte
+	pacache   []byte
+	origin    []byte
+	account   []byte
+	subject   []byte
+	deliver   []byte
+	mapped    []byte
+	reply     []byte
+	szb       []byte
+	hdb       []byte
+	queues    [][]byte
+	size      int
+	hdr       int
+	psi       []*serviceImport
+	trace     *msgTrace
+	delivered bool // Only used for service imports
 }
 
 // Parser constants
@@ -163,31 +166,50 @@ func (c *client) parse(buf []byte) error {
 						goto authErr
 					}
 					var ok bool
-					// Check here for NoAuthUser. If this is set allow non CONNECT protos as our first.
-					// E.g. telnet proto demos.
-					if noAuthUser := s.getOpts().NoAuthUser; noAuthUser != _EMPTY_ {
-						s.mu.Lock()
-						user, exists := s.users[noAuthUser]
-						s.mu.Unlock()
-						if exists {
-							c.RegisterUser(user)
-							c.mu.Lock()
-							c.clearAuthTimer()
-							c.flags.set(connectReceived)
-							c.mu.Unlock()
-							authSet, ok = false, true
+					switch c.kind {
+					case CLIENT:
+						// Check here for NoAuthUser. If this is set allow non CONNECT protos as our first.
+						// E.g. telnet proto demos.
+						opts := s.getOpts()
+						noAuthUser := opts.NoAuthUser
+						if c.ws != nil {
+							if noAuthUserWS := opts.Websocket.NoAuthUser; noAuthUserWS != _EMPTY_ {
+								noAuthUser = noAuthUserWS
+							}
 						}
+						if noAuthUser != _EMPTY_ {
+							s.mu.Lock()
+							user, exists := s.users[noAuthUser]
+							s.mu.Unlock()
+							// Run the same authentication pipeline as CONNECT. In addition to
+							// the connection restrictions checked here, this delegates the
+							// decision to auth callouts or custom authenticators.
+							if exists && !user.ProxyRequired && c.connectionTypeAllowed(user.AllowedConnectionTypes) {
+								// Mirror processConnect: clear the auth-timeout timer and
+								// mark CONNECT received *before* authenticating. Auth may
+								// install a JWT/callout expiration timer into the same c.atmr
+								// slot, so clearing it afterwards would drop the expiration
+								// and leave the client connected past expiry. Setting
+								// connectReceived first also lets the expiration deadline be
+								// recorded on c.expires.
+								c.mu.Lock()
+								c.clearAuthTimer()
+								c.flags.set(connectReceived)
+								c.mu.Unlock()
+								if s.checkAuthentication(c) {
+									authSet, ok = false, true
+								}
+							}
+						}
+					case LEAF:
+						// Compressed inbound leaf-node negotiation may require INFO
+						// before CONNECT. Without compression, leaf connections must
+						// still start with CONNECT.
+						ok = (b == 'I' || b == 'i') && needsCompression(s.getOpts().LeafNode.Compression.Mode)
 					}
 					if !ok {
 						goto authErr
 					}
-				}
-				// If the connection is a gateway connection, make sure that
-				// if this is an inbound, it starts with a CONNECT.
-				if c.kind == GATEWAY && !c.gw.outbound && !c.gw.connected {
-					// Use auth violation since no CONNECT was sent.
-					// It could be a parseErr too.
-					goto authErr
 				}
 			}
 			switch b {
@@ -285,7 +307,11 @@ func (c *client) parse(buf []byte) error {
 				if trace {
 					c.traceInOp("HPUB", arg)
 				}
-				if err := c.processHeaderPub(arg); err != nil {
+				var remaining []byte
+				if i < len(buf) {
+					remaining = buf[i+1:]
+				}
+				if err := c.processHeaderPub(arg, remaining); err != nil {
 					return err
 				}
 
@@ -483,23 +509,38 @@ func (c *client) parse(buf []byte) error {
 				c.msgBuf = buf[c.as : i+1]
 			}
 
-			// Check for mappings.
-			if (c.kind == CLIENT || c.kind == LEAF) && c.in.flags.isSet(hasMappings) {
-				changed := c.selectMappedSubject()
-				if trace && changed {
-					c.traceInOp("MAPPING", []byte(fmt.Sprintf("%s -> %s", c.pa.mapped, c.pa.subject)))
+			var mt *msgTrace
+			var skip bool
+			if c.pa.hdr > 0 {
+				skip, mt = c.initMsgTrace(c.msgBuf[:c.pa.hdr], nil)
+			}
+			if !skip {
+				// Check for mappings.
+				if (c.kind == CLIENT || c.kind == LEAF) && c.in.flags.isSet(hasMappings) {
+					changed := c.selectMappedSubject()
+					if changed {
+						if trace {
+							c.traceInOp("MAPPING", []byte(fmt.Sprintf("%s -> %s", c.pa.mapped, c.pa.subject)))
+						}
+						// c.pa.subject is the subject the original is now mapped to.
+						mt.addSubjectMappingEvent(c.pa.subject)
+					}
 				}
-			}
-			if trace {
-				c.traceMsg(c.msgBuf)
-			}
+				if trace {
+					c.traceMsg(c.msgBuf)
+				}
 
-			c.processInboundMsg(c.msgBuf)
+				c.processInboundMsg(c.msgBuf)
+
+				mt.sendEvent()
+			}
 			c.argBuf, c.msgBuf, c.header = nil, nil, nil
 			c.drop, c.as, c.state = 0, i+1, OP_START
 			// Drop all pub args
 			c.pa.arg, c.pa.pacache, c.pa.origin, c.pa.account, c.pa.subject, c.pa.mapped = nil, nil, nil, nil, nil, nil
 			c.pa.reply, c.pa.hdr, c.pa.size, c.pa.szb, c.pa.hdb, c.pa.queues = nil, -1, 0, nil, nil, nil
+			c.pa.trace = nil
+			c.pa.delivered = false
 			lmsg = false
 		case OP_A:
 			switch b {
@@ -788,7 +829,8 @@ func (c *client) parse(buf []byte) error {
 							c.traceInOp("LS-", arg)
 						}
 					}
-					err = c.processRemoteUnsub(arg)
+					leafUnsub := c.op == 'L' || c.op == 'l'
+					err = c.processRemoteUnsub(arg, leafUnsub)
 				case GATEWAY:
 					if trace {
 						c.traceInOp("RS-", arg)
@@ -921,7 +963,7 @@ func (c *client) parse(buf []byte) error {
 					return err
 				}
 				if trace {
-					c.traceInOp("CONNECT", removePassFromTrace(arg))
+					c.traceInOp("CONNECT", removeSecretsFromTrace(arg))
 				}
 				if err := c.processConnect(arg); err != nil {
 					return err
@@ -1230,10 +1272,17 @@ func protoSnippet(start, max int, buf []byte) string {
 // If so, an error is sent to the client and the connection is closed.
 // The error ErrMaxControlLine is returned.
 func (c *client) overMaxControlLineLimit(arg []byte, mcl int32) error {
+	// Widen to int64 so mcl*16 cannot overflow for large configured values.
+	effective := int64(mcl)
 	if c.kind != CLIENT {
-		return nil
+		// This is the upper bound on argBuf length for LEAF, ROUTER, and GATEWAY connections.
+		// These kinds need longer arg lines than CLIENT (which is capped at mcl=4096 by default)
+		// because cluster/leaf frames encode origin, account, reply, and queue groups.
+		// By default, this is 64 KB, which matches maxBufSize so a single oversized read
+		// is caught on the very next parse call.
+		effective *= 16
 	}
-	if len(arg) > int(mcl) {
+	if int64(len(arg)) > effective {
 		err := NewErrorCtx(ErrMaxControlLine, "State %d, max_control_line %d, Buffer len %d (snip: %s...)",
 			c.state, int(mcl), len(c.argBuf), protoSnippet(0, MAX_CONTROL_LINE_SNIPPET_SIZE, arg))
 		c.sendErr(err.Error())
@@ -1270,7 +1319,7 @@ func (c *client) clonePubArg(lmsg bool) error {
 		if c.pa.hdr < 0 {
 			return c.processPub(c.argBuf)
 		} else {
-			return c.processHeaderPub(c.argBuf)
+			return c.processHeaderPub(c.argBuf, nil)
 		}
 	}
 }

@@ -1,50 +1,30 @@
 package nats
 
 import (
-	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	cwerrors "github.com/CoverWhale/coverwhale-go/errors"
 	"github.com/CoverWhale/logr"
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/micro"
 	"github.com/segmentio/ksuid"
 )
 
 type HandlerWithErrors func(*logr.Logger, micro.Request) error
 
-type ClientError struct {
-	Code    int
-	Details string
-}
-
-func (c ClientError) Error() string {
-	return c.Details
-}
-
-func (c *ClientError) Body() []byte {
-	return []byte(fmt.Sprintf(`{"error": "%s"}`, c.Details))
-}
-
-func (c *ClientError) CodeString() string {
-	return strconv.Itoa(c.Code)
-}
-
-func (c ClientError) As(target any) bool {
-	_, ok := target.(*ClientError)
-	return ok
-}
-
-func NewClientError(err error, code int) ClientError {
-	return ClientError{
-		Code:    code,
-		Details: err.Error(),
-	}
+// Interface of a type of client error, not necessarily the cwerrors.ClientError type
+type ClientError interface {
+	Error() string
+	Code() int
+	Body() []byte
+	LoggedError() string
 }
 
 func HandleNotify(s micro.Service, healthFuncs ...func(chan<- string, micro.Service)) error {
@@ -74,13 +54,26 @@ func ErrorHandler(logger *logr.Logger, h HandlerWithErrors) micro.HandlerFunc {
 		start := time.Now()
 		id, err := SubjectToRequestID(r.Subject())
 		if err != nil {
-			handleRequestError(logger, NewClientError(err, 400), r)
+			handleRequestError(logger, cwerrors.NewClientError(err, 400), r)
 			return
 		}
 		reqLogger := logger.WithContext(map[string]string{"request_id": id, "path": r.Subject()})
 		defer func() {
 			reqLogger.Infof("duration %dms", time.Since(start).Milliseconds())
 		}()
+
+		correlationId := r.Headers().Get("X-Correlation-Id")
+		if correlationId != "" {
+			reqLogger = reqLogger.WithContext(map[string]string{"correlation_id": correlationId})
+		}
+
+		if err := buildQueryHeaders(r); err != nil {
+			handleRequestError(reqLogger, err, r)
+		}
+
+		if r.Headers().Get("X-Request-ID") == "" && len(r.Headers()) != 0 {
+			r.Headers()["X-Request-ID"] = []string{id}
+		}
 
 		err = h(reqLogger, r)
 		if err == nil {
@@ -91,16 +84,39 @@ func ErrorHandler(logger *logr.Logger, h HandlerWithErrors) micro.HandlerFunc {
 	}
 }
 
-func handleRequestError(logger *logr.Logger, err error, r micro.Request) {
-	var ce ClientError
-	if errors.As(err, &ce) {
-		r.Error(ce.CodeString(), http.StatusText(ce.Code), ce.Body())
-		return
+// Create CW specific headers from the NATS bridge plugin headers
+func buildQueryHeaders(r micro.Request) error {
+	headers := nats.Header(r.Headers())
+	query := headers.Get("X-NatsBridge-UrlQuery")
+	parsed, err := url.ParseQuery(query)
+	if err != nil {
+		return err
 	}
 
-	logger.Error(err)
+	for k, v := range parsed {
+		key := fmt.Sprintf("X-CW-%s", k)
+		headers[key] = v
+	}
 
-	r.Error("500", "internal server error", []byte(`{"error": "internal server error"}`))
+	return nil
+}
+
+func GetQueryHeaders(headers micro.Headers, key string) []string {
+	k := fmt.Sprintf("X-CW-%s", key)
+	return headers.Values(k)
+}
+
+// handleRequestError will return a client error if it is a client error, otherwise it will return a 500
+func handleRequestError(logger *logr.Logger, err error, r micro.Request) {
+	ce, ok := err.(ClientError)
+	if ok {
+		logger.Error(ce.LoggedError())
+		r.Error(fmt.Sprintf("%d", ce.Code()), http.StatusText(ce.Code()), ce.Body())
+	}
+
+	logger.Error(err.Error())
+
+	r.Error("500", "internal server error", []byte(`{"errors": [{"code": "CWINT1", "message": "internal server error", "type": "server", "level": "warning"}]}`))
 }
 
 func SubjectToRequestID(s string) (string, error) {

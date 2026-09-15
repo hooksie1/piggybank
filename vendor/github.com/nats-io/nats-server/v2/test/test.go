@@ -1,4 +1,4 @@
-// Copyright 2012-2019 The NATS Authors
+// Copyright 2012-2025 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -29,12 +29,14 @@ import (
 	"time"
 
 	"github.com/nats-io/nats-server/v2/server"
+
+	srvlog "github.com/nats-io/nats-server/v2/logger"
 )
 
 // So we can pass tests and benchmarks..
 type tLogger interface {
-	Fatalf(format string, args ...interface{})
-	Errorf(format string, args ...interface{})
+	Fatalf(format string, args ...any)
+	Errorf(format string, args ...any)
 }
 
 // DefaultTestOptions are default options for the unit tests.
@@ -49,7 +51,8 @@ var DefaultTestOptions = server.Options{
 
 // RunDefaultServer starts a new Go routine based server using the default options
 func RunDefaultServer() *server.Server {
-	return RunServer(&DefaultTestOptions)
+	dto := DefaultTestOptions
+	return RunServer(&dto)
 }
 
 func RunRandClientPortServer() *server.Server {
@@ -73,7 +76,8 @@ func RunServer(opts *server.Options) *server.Server {
 
 func RunServerCallback(opts *server.Options, callback func(*server.Server)) *server.Server {
 	if opts == nil {
-		opts = &DefaultTestOptions
+		dto := DefaultTestOptions
+		opts = &dto
 	}
 	// Optionally override for individual debugging of tests
 	opts.NoLog = !doLog
@@ -92,6 +96,13 @@ func RunServerCallback(opts *server.Options, callback func(*server.Server)) *ser
 
 	if doLog {
 		s.ConfigureLogger()
+	}
+
+	if ll := os.Getenv("NATS_LOGGING"); ll != "" {
+		log := srvlog.NewTestLogger(fmt.Sprintf("[%s] | ", s), true)
+		debug := ll == "debug" || ll == "trace"
+		trace := ll == "trace"
+		s.SetLoggerV2(log, debug, trace, false)
 	}
 
 	if callback != nil {
@@ -135,7 +146,7 @@ func RunServerWithConfigOverrides(configFile string, optsCallback func(*server.O
 	return
 }
 
-func stackFatalf(t tLogger, f string, args ...interface{}) {
+func stackFatalf(t tLogger, f string, args ...any) {
 	lines := make([]string, 0, 32)
 	msg := fmt.Sprintf(f, args...)
 	lines = append(lines, msg)
@@ -182,7 +193,7 @@ func createRouteConn(t tLogger, host string, port int) net.Conn {
 }
 
 func createClientConn(t tLogger, host string, port int) net.Conn {
-	addr := fmt.Sprintf("%s:%d", host, port)
+	addr := net.JoinHostPort(host, fmt.Sprintf("%d", port))
 	c, err := net.DialTimeout("tcp", addr, 3*time.Second)
 	if err != nil {
 		stackFatalf(t, "Could not connect to server: %v\n", err)
@@ -304,7 +315,7 @@ func setupConnWithAccount(t tLogger, s *server.Server, c net.Conn, account strin
 
 func setupConnWithUserPass(t tLogger, c net.Conn, username, password string) (sendFun, expectFun) {
 	checkInfoMsg(t, c)
-	cs := fmt.Sprintf("CONNECT {\"verbose\":%v,\"pedantic\":%v,\"tls_required\":%v,\"protocol\":1,\"user\":%q,\"pass\":%q}\r\n",
+	cs := fmt.Sprintf("CONNECT {\"verbose\":%v,\"pedantic\":%v,\"tls_required\":%v,\"user\":%q,\"pass\":%q}\r\n",
 		false, false, false, username, password)
 	sendProto(t, c, cs)
 	return sendCommand(t, c), expectLefMostCommand(t, c)
@@ -364,9 +375,10 @@ var (
 	asubRe      = regexp.MustCompile(`A\+\s+([^\r\n]+)\r\n`)
 	aunsubRe    = regexp.MustCompile(`A\-\s+([^\r\n]+)\r\n`)
 	lsubRe      = regexp.MustCompile(`LS\+\s+([^\s]+)\s*([^\s]+)?\s*(\d+)?\r\n`)
-	lunsubRe    = regexp.MustCompile(`LS\-\s+([^\s]+)\s*([^\s]+)?\r\n`)
+	lunsubRe    = regexp.MustCompile(`LS\-\s+([^\s]+)\s*([^\s]+)\s*([^\s]+)?\r\n`)
 	lmsgRe      = regexp.MustCompile(`(?:(?:LMSG\s+([^\s]+)\s+(?:([|+]\s+([\w\s]+)|[^\s]+)[^\S\r\n]+)?(\d+)\s*\r\n([^\\r\\n]*?)\r\n)+?)`)
 	rlsubRe     = regexp.MustCompile(`LS\+\s+([^\s]+)\s+([^\s]+)\s+([^\s]+)\s*([^\s]+)?\s*(\d+)?\r\n`)
+	rlunsubRe   = regexp.MustCompile(`LS\-\s+([^\s]+)\s+([^\s]+)\s+([^\s]+)\s*([^\s]+)?\r\n`)
 )
 
 const (

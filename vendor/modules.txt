@@ -1,68 +1,95 @@
 # aead.dev/minisign v0.3.0
 ## explicit; go 1.21
 aead.dev/minisign
-# github.com/99designs/gqlgen v0.17.43
-## explicit; go 1.18
+# github.com/99designs/gqlgen v0.17.95
+## explicit; go 1.26
 github.com/99designs/gqlgen/graphql
 github.com/99designs/gqlgen/graphql/errcode
 github.com/99designs/gqlgen/graphql/executor
-# github.com/CoverWhale/coverwhale-go v1.2.1
+github.com/99designs/gqlgen/graphql/introspection
+# github.com/CoverWhale/coverwhale-go v1.5.3
 ## explicit; go 1.22.2
+github.com/CoverWhale/coverwhale-go/errors
 github.com/CoverWhale/coverwhale-go/transports/nats
 # github.com/CoverWhale/gupdate v0.0.2
 ## explicit; go 1.22.2
 github.com/CoverWhale/gupdate
-# github.com/CoverWhale/logr v0.0.0-20240513164108-a4fd5504b303
+# github.com/CoverWhale/logr v1.0.0
 ## explicit; go 1.19
 github.com/CoverWhale/logr
-# github.com/agnivade/levenshtein v1.1.1
-## explicit; go 1.13
+# github.com/agnivade/levenshtein v1.2.1
+## explicit; go 1.21
 github.com/agnivade/levenshtein
-# github.com/briandowns/spinner v1.23.0
+# github.com/antithesishq/antithesis-sdk-go v0.8.0
+## explicit; go 1.24.0
+github.com/antithesishq/antithesis-sdk-go/assert
+github.com/antithesishq/antithesis-sdk-go/internal
+# github.com/briandowns/spinner v1.23.2
 ## explicit; go 1.17
 github.com/briandowns/spinner
-# github.com/cpuguy83/go-md2man/v2 v2.0.4
-## explicit; go 1.11
+# github.com/cpuguy83/go-md2man/v2 v2.0.7
+## explicit; go 1.12
 github.com/cpuguy83/go-md2man/v2/md2man
-# github.com/fatih/color v1.17.0
-## explicit; go 1.17
+# github.com/dustin/go-humanize v1.0.1
+## explicit; go 1.16
+github.com/dustin/go-humanize
+# github.com/expr-lang/expr v1.17.8
+## explicit; go 1.18
+github.com/expr-lang/expr
+github.com/expr-lang/expr/ast
+github.com/expr-lang/expr/builtin
+github.com/expr-lang/expr/checker
+github.com/expr-lang/expr/checker/nature
+github.com/expr-lang/expr/compiler
+github.com/expr-lang/expr/conf
+github.com/expr-lang/expr/file
+github.com/expr-lang/expr/internal/deref
+github.com/expr-lang/expr/internal/ring
+github.com/expr-lang/expr/optimizer
+github.com/expr-lang/expr/parser
+github.com/expr-lang/expr/parser/lexer
+github.com/expr-lang/expr/parser/operator
+github.com/expr-lang/expr/parser/utils
+github.com/expr-lang/expr/patcher
+github.com/expr-lang/expr/types
+github.com/expr-lang/expr/vm
+github.com/expr-lang/expr/vm/runtime
+# github.com/fatih/color v1.19.0
+## explicit; go 1.25.0
 github.com/fatih/color
-# github.com/fsnotify/fsnotify v1.7.0
-## explicit; go 1.17
+# github.com/fsnotify/fsnotify v1.10.1
+## explicit; go 1.23
 github.com/fsnotify/fsnotify
-# github.com/google/uuid v1.4.0
+github.com/fsnotify/fsnotify/internal
+# github.com/go-viper/mapstructure/v2 v2.5.0
+## explicit; go 1.18
+github.com/go-viper/mapstructure/v2
+github.com/go-viper/mapstructure/v2/internal/errors
+# github.com/google/go-tpm v0.9.8
+## explicit; go 1.22
+github.com/google/go-tpm/legacy/tpm2
+github.com/google/go-tpm/tpmutil
+github.com/google/go-tpm/tpmutil/tbs
+# github.com/google/uuid v1.6.0
 ## explicit
 github.com/google/uuid
-# github.com/hashicorp/hcl v1.0.0
-## explicit
-github.com/hashicorp/hcl
-github.com/hashicorp/hcl/hcl/ast
-github.com/hashicorp/hcl/hcl/parser
-github.com/hashicorp/hcl/hcl/printer
-github.com/hashicorp/hcl/hcl/scanner
-github.com/hashicorp/hcl/hcl/strconv
-github.com/hashicorp/hcl/hcl/token
-github.com/hashicorp/hcl/json/parser
-github.com/hashicorp/hcl/json/scanner
-github.com/hashicorp/hcl/json/token
 # github.com/inconshreveable/mousetrap v1.1.0
 ## explicit; go 1.18
 github.com/inconshreveable/mousetrap
-# github.com/klauspost/compress v1.17.7
-## explicit; go 1.20
+# github.com/klauspost/compress v1.20.0
+## explicit; go 1.25
 github.com/klauspost/compress/flate
+github.com/klauspost/compress/internal/le
 github.com/klauspost/compress/internal/race
+github.com/klauspost/compress/internal/regmask
 github.com/klauspost/compress/s2
-# github.com/magiconair/properties v1.8.7
-## explicit; go 1.19
-github.com/magiconair/properties
-# github.com/mattn/go-colorable v0.1.13
-## explicit; go 1.15
+# github.com/mattn/go-colorable v0.1.15
+## explicit; go 1.18
 github.com/mattn/go-colorable
-# github.com/mattn/go-isatty v0.0.20
-## explicit; go 1.15
+# github.com/mattn/go-isatty v0.0.24
+## explicit; go 1.20
 github.com/mattn/go-isatty
-# github.com/minio/highwayhash v1.0.2
+# github.com/minio/highwayhash v1.0.4
 ## explicit; go 1.15
 github.com/minio/highwayhash
 # github.com/minio/selfupdate v0.6.0
@@ -70,93 +97,92 @@ github.com/minio/highwayhash
 github.com/minio/selfupdate
 github.com/minio/selfupdate/internal/binarydist
 github.com/minio/selfupdate/internal/osext
-# github.com/mitchellh/mapstructure v1.5.0
-## explicit; go 1.14
-github.com/mitchellh/mapstructure
-# github.com/nats-io/jsm.go v0.1.1
-## explicit; go 1.21
+# github.com/nats-io/jsm.go v0.4.1
+## explicit; go 1.25.0
+github.com/nats-io/jsm.go
+github.com/nats-io/jsm.go/api
+github.com/nats-io/jsm.go/api/event
+github.com/nats-io/jsm.go/api/jetstream/advisory
+github.com/nats-io/jsm.go/api/jetstream/metric
+github.com/nats-io/jsm.go/api/server/advisory
+github.com/nats-io/jsm.go/api/server/metric
+github.com/nats-io/jsm.go/api/server/zmonitor
 github.com/nats-io/jsm.go/natscontext
-# github.com/nats-io/jwt/v2 v2.5.5
-## explicit; go 1.18
+github.com/nats-io/jsm.go/schemas
+# github.com/nats-io/jwt/v2 v2.8.2
+## explicit; go 1.25.0
 github.com/nats-io/jwt/v2
-# github.com/nats-io/nats-server/v2 v2.10.12
-## explicit; go 1.20
+# github.com/nats-io/nats-server/v2 v2.14.6
+## explicit; go 1.26.0
 github.com/nats-io/nats-server/v2/conf
 github.com/nats-io/nats-server/v2/internal/fastrand
 github.com/nats-io/nats-server/v2/internal/ldap
 github.com/nats-io/nats-server/v2/logger
 github.com/nats-io/nats-server/v2/server
+github.com/nats-io/nats-server/v2/server/ats
 github.com/nats-io/nats-server/v2/server/avl
 github.com/nats-io/nats-server/v2/server/certidp
 github.com/nats-io/nats-server/v2/server/certstore
+github.com/nats-io/nats-server/v2/server/elastic
+github.com/nats-io/nats-server/v2/server/gsl
 github.com/nats-io/nats-server/v2/server/pse
 github.com/nats-io/nats-server/v2/server/stree
 github.com/nats-io/nats-server/v2/server/sysmem
+github.com/nats-io/nats-server/v2/server/thw
+github.com/nats-io/nats-server/v2/server/tpm
 github.com/nats-io/nats-server/v2/test
-# github.com/nats-io/nats.go v1.36.0
-## explicit; go 1.20
+# github.com/nats-io/nats.go v1.53.1
+## explicit; go 1.25.0
 github.com/nats-io/nats.go
 github.com/nats-io/nats.go/encoders/builtin
 github.com/nats-io/nats.go/internal/parser
 github.com/nats-io/nats.go/micro
 github.com/nats-io/nats.go/util
-# github.com/nats-io/nkeys v0.4.7
-## explicit; go 1.20
+# github.com/nats-io/nkeys v0.4.16
+## explicit; go 1.25.0
 github.com/nats-io/nkeys
 # github.com/nats-io/nuid v1.0.1
 ## explicit
 github.com/nats-io/nuid
-# github.com/pelletier/go-toml/v2 v2.2.2
-## explicit; go 1.16
+# github.com/pelletier/go-toml/v2 v2.4.3
+## explicit; go 1.21.0
 github.com/pelletier/go-toml/v2
-github.com/pelletier/go-toml/v2/internal/characters
-github.com/pelletier/go-toml/v2/internal/danger
+github.com/pelletier/go-toml/v2/internal/parserbridge
 github.com/pelletier/go-toml/v2/internal/tracker
 github.com/pelletier/go-toml/v2/unstable
 # github.com/russross/blackfriday/v2 v2.1.0
 ## explicit
 github.com/russross/blackfriday/v2
-# github.com/sagikazarmark/locafero v0.4.0
-## explicit; go 1.20
+# github.com/sagikazarmark/locafero v0.12.0
+## explicit; go 1.23.0
 github.com/sagikazarmark/locafero
-# github.com/sagikazarmark/slog-shim v0.1.0
-## explicit; go 1.20
-github.com/sagikazarmark/slog-shim
+github.com/sagikazarmark/locafero/internal/queue
 # github.com/segmentio/ksuid v1.0.4
 ## explicit; go 1.12
 github.com/segmentio/ksuid
-# github.com/sosodev/duration v1.1.0
+# github.com/sosodev/duration v1.4.0
 ## explicit; go 1.17
 github.com/sosodev/duration
-# github.com/sourcegraph/conc v0.3.0
-## explicit; go 1.19
-github.com/sourcegraph/conc
-github.com/sourcegraph/conc/internal/multierror
-github.com/sourcegraph/conc/iter
-github.com/sourcegraph/conc/panics
-# github.com/spf13/afero v1.11.0
-## explicit; go 1.19
+# github.com/spf13/afero v1.15.0
+## explicit; go 1.23.0
 github.com/spf13/afero
 github.com/spf13/afero/internal/common
 github.com/spf13/afero/mem
-# github.com/spf13/cast v1.6.0
-## explicit; go 1.19
+# github.com/spf13/cast v1.10.0
+## explicit; go 1.21.0
 github.com/spf13/cast
-# github.com/spf13/cobra v1.8.1
+github.com/spf13/cast/internal
+# github.com/spf13/cobra v1.10.2
 ## explicit; go 1.15
 github.com/spf13/cobra
 github.com/spf13/cobra/doc
-# github.com/spf13/pflag v1.0.5
+# github.com/spf13/pflag v1.0.10
 ## explicit; go 1.12
 github.com/spf13/pflag
-# github.com/spf13/viper v1.19.0
-## explicit; go 1.20
+# github.com/spf13/viper v1.21.0
+## explicit; go 1.23.0
 github.com/spf13/viper
-github.com/spf13/viper/internal/encoding
 github.com/spf13/viper/internal/encoding/dotenv
-github.com/spf13/viper/internal/encoding/hcl
-github.com/spf13/viper/internal/encoding/ini
-github.com/spf13/viper/internal/encoding/javaproperties
 github.com/spf13/viper/internal/encoding/json
 github.com/spf13/viper/internal/encoding/toml
 github.com/spf13/viper/internal/encoding/yaml
@@ -164,18 +190,20 @@ github.com/spf13/viper/internal/features
 # github.com/subosito/gotenv v1.6.0
 ## explicit; go 1.18
 github.com/subosito/gotenv
-# github.com/vektah/gqlparser/v2 v2.5.11
-## explicit; go 1.19
+# github.com/vektah/gqlparser/v2 v2.5.37
+## explicit; go 1.22
 github.com/vektah/gqlparser/v2/ast
 github.com/vektah/gqlparser/v2/gqlerror
 github.com/vektah/gqlparser/v2/lexer
 github.com/vektah/gqlparser/v2/parser
 github.com/vektah/gqlparser/v2/validator
-# go.uber.org/multierr v1.11.0
-## explicit; go 1.19
-go.uber.org/multierr
-# golang.org/x/crypto v0.24.0
-## explicit; go 1.18
+github.com/vektah/gqlparser/v2/validator/core
+github.com/vektah/gqlparser/v2/validator/rules
+# go.yaml.in/yaml/v3 v3.0.5
+## explicit; go 1.16
+go.yaml.in/yaml/v3
+# golang.org/x/crypto v0.57.0
+## explicit; go 1.26.0
 golang.org/x/crypto/bcrypt
 golang.org/x/crypto/blake2b
 golang.org/x/crypto/blowfish
@@ -184,8 +212,6 @@ golang.org/x/crypto/chacha20poly1305
 golang.org/x/crypto/cryptobyte
 golang.org/x/crypto/cryptobyte/asn1
 golang.org/x/crypto/curve25519
-golang.org/x/crypto/curve25519/internal/field
-golang.org/x/crypto/ed25519
 golang.org/x/crypto/internal/alias
 golang.org/x/crypto/internal/poly1305
 golang.org/x/crypto/nacl/box
@@ -194,19 +220,15 @@ golang.org/x/crypto/ocsp
 golang.org/x/crypto/pbkdf2
 golang.org/x/crypto/salsa20/salsa
 golang.org/x/crypto/scrypt
-# golang.org/x/exp v0.0.0-20240506185415-9bf2ced13842
-## explicit; go 1.20
-golang.org/x/exp/constraints
-golang.org/x/exp/slices
-golang.org/x/exp/slog
-golang.org/x/exp/slog/internal
-golang.org/x/exp/slog/internal/buffer
-# golang.org/x/net v0.23.0
-## explicit; go 1.18
+# golang.org/x/net v0.59.0
+## explicit; go 1.26.0
 golang.org/x/net/internal/socks
 golang.org/x/net/proxy
-# golang.org/x/sys v0.21.0
-## explicit; go 1.18
+# golang.org/x/sync v0.23.0
+## explicit; go 1.26.0
+golang.org/x/sync/semaphore
+# golang.org/x/sys v0.48.0
+## explicit; go 1.26.0
 golang.org/x/sys/cpu
 golang.org/x/sys/plan9
 golang.org/x/sys/unix
@@ -215,25 +237,30 @@ golang.org/x/sys/windows/registry
 golang.org/x/sys/windows/svc
 golang.org/x/sys/windows/svc/eventlog
 golang.org/x/sys/windows/svc/mgr
-# golang.org/x/term v0.21.0
-## explicit; go 1.18
+# golang.org/x/term v0.46.0
+## explicit; go 1.26.0
 golang.org/x/term
-# golang.org/x/text v0.16.0
-## explicit; go 1.18
+# golang.org/x/text v0.42.0
+## explicit; go 1.26.0
+golang.org/x/text/cases
 golang.org/x/text/encoding
 golang.org/x/text/encoding/internal
 golang.org/x/text/encoding/internal/identifier
 golang.org/x/text/encoding/unicode
+golang.org/x/text/internal
+golang.org/x/text/internal/language
+golang.org/x/text/internal/language/compact
+golang.org/x/text/internal/tag
 golang.org/x/text/internal/utf8internal
+golang.org/x/text/language
 golang.org/x/text/runes
 golang.org/x/text/transform
 golang.org/x/text/unicode/norm
-# golang.org/x/time v0.5.0
-## explicit; go 1.18
+# golang.org/x/time v0.16.0
+## explicit; go 1.26.0
 golang.org/x/time/rate
-# gopkg.in/ini.v1 v1.67.0
+# gopkg.in/check.v1 v1.0.0-20190902080502-41f04d3bba15
 ## explicit
-gopkg.in/ini.v1
 # gopkg.in/yaml.v3 v3.0.1
 ## explicit
 gopkg.in/yaml.v3

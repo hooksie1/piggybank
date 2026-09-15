@@ -1,4 +1,4 @@
-// Copyright 2012-2023 The NATS Authors
+// Copyright 2012-2025 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -15,6 +15,7 @@ package server
 
 import (
 	"context"
+	"crypto/fips140"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
@@ -26,6 +27,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -61,27 +63,30 @@ type PinnedCertSet map[string]struct{}
 // NOTE: This structure is no longer used for monitoring endpoints
 // and json tags are deprecated and may be removed in the future.
 type ClusterOpts struct {
-	Name              string            `json:"-"`
-	Host              string            `json:"addr,omitempty"`
-	Port              int               `json:"cluster_port,omitempty"`
-	Username          string            `json:"-"`
-	Password          string            `json:"-"`
-	AuthTimeout       float64           `json:"auth_timeout,omitempty"`
-	Permissions       *RoutePermissions `json:"-"`
-	TLSTimeout        float64           `json:"-"`
-	TLSConfig         *tls.Config       `json:"-"`
-	TLSMap            bool              `json:"-"`
-	TLSCheckKnownURLs bool              `json:"-"`
-	TLSPinnedCerts    PinnedCertSet     `json:"-"`
-	ListenStr         string            `json:"-"`
-	Advertise         string            `json:"-"`
-	NoAdvertise       bool              `json:"-"`
-	ConnectRetries    int               `json:"-"`
-	PoolSize          int               `json:"-"`
-	PinnedAccounts    []string          `json:"-"`
-	Compression       CompressionOpts   `json:"-"`
-	PingInterval      time.Duration     `json:"-"`
-	MaxPingsOut       int               `json:"-"`
+	Name              string             `json:"-"`
+	Host              string             `json:"addr,omitempty"`
+	Port              int                `json:"cluster_port,omitempty"`
+	Username          string             `json:"-"`
+	Password          string             `json:"-"`
+	AuthTimeout       float64            `json:"auth_timeout,omitempty"`
+	Permissions       *RoutePermissions  `json:"-"`
+	TLSTimeout        float64            `json:"-"`
+	TLSConfig         *tls.Config        `json:"-"`
+	TLSMap            bool               `json:"-"`
+	TLSCheckKnownURLs bool               `json:"-"`
+	TLSPinnedCerts    PinnedCertSet      `json:"-"`
+	ListenStr         string             `json:"-"`
+	Advertise         string             `json:"-"`
+	NoAdvertise       bool               `json:"-"`
+	ConnectRetries    int                `json:"-"`
+	ConnectBackoff    bool               `json:"-"`
+	PoolSize          int                `json:"-"`
+	PinnedAccounts    []string           `json:"-"`
+	Compression       CompressionOpts    `json:"-"`
+	PingInterval      time.Duration      `json:"-"`
+	MaxPingsOut       int                `json:"-"`
+	WriteDeadline     time.Duration      `json:"-"`
+	WriteTimeout      WriteTimeoutPolicy `json:"-"`
 
 	// Not exported (used in tests)
 	resolver netResolver
@@ -104,6 +109,34 @@ type CompressionOpts struct {
 	RTTThresholds []time.Duration
 }
 
+func (c1 *CompressionOpts) equals(c2 *CompressionOpts) bool {
+	if c1 == c2 {
+		return true
+	}
+	if (c1 == nil && c2 != nil) || (c1 != nil && c2 == nil) {
+		return false
+	}
+	if c1.Mode != c2.Mode {
+		return false
+	}
+	// For s2_auto, if one has an empty RTTThresholds, it is equivalent
+	// to the defaultCompressionS2AutoRTTThresholds array, so compare with that.
+	if c1.Mode == CompressionS2Auto {
+		rtts1 := c1.RTTThresholds
+		if len(rtts1) == 0 {
+			rtts1 = defaultCompressionS2AutoRTTThresholds
+		}
+		rtts2 := c2.RTTThresholds
+		if len(rtts2) == 0 {
+			rtts2 = defaultCompressionS2AutoRTTThresholds
+		}
+		if !reflect.DeepEqual(rtts1, rtts2) {
+			return false
+		}
+	}
+	return true
+}
+
 // GatewayOpts are options for gateways.
 // NOTE: This structure is no longer used for monitoring endpoints
 // and json tags are deprecated and may be removed in the future.
@@ -121,8 +154,11 @@ type GatewayOpts struct {
 	TLSPinnedCerts    PinnedCertSet        `json:"-"`
 	Advertise         string               `json:"advertise,omitempty"`
 	ConnectRetries    int                  `json:"connect_retries,omitempty"`
+	ConnectBackoff    bool                 `json:"connect_backoff,omitempty"`
 	Gateways          []*RemoteGatewayOpts `json:"gateways,omitempty"`
 	RejectUnknown     bool                 `json:"reject_unknown,omitempty"` // config got renamed to reject_unknown_cluster
+	WriteDeadline     time.Duration        `json:"-"`
+	WriteTimeout      WriteTimeoutPolicy   `json:"-"`
 
 	// Not exported, for tests.
 	resolver         netResolver
@@ -145,22 +181,36 @@ type RemoteGatewayOpts struct {
 
 // LeafNodeOpts are options for a given server to accept leaf node connections and/or connect to a remote cluster.
 type LeafNodeOpts struct {
-	Host              string        `json:"addr,omitempty"`
-	Port              int           `json:"port,omitempty"`
-	Username          string        `json:"-"`
-	Password          string        `json:"-"`
-	Nkey              string        `json:"-"`
-	Account           string        `json:"-"`
-	Users             []*User       `json:"-"`
-	AuthTimeout       float64       `json:"auth_timeout,omitempty"`
-	TLSConfig         *tls.Config   `json:"-"`
-	TLSTimeout        float64       `json:"tls_timeout,omitempty"`
-	TLSMap            bool          `json:"-"`
-	TLSPinnedCerts    PinnedCertSet `json:"-"`
-	TLSHandshakeFirst bool          `json:"-"`
-	Advertise         string        `json:"-"`
-	NoAdvertise       bool          `json:"-"`
-	ReconnectInterval time.Duration `json:"-"`
+	Host           string        `json:"addr,omitempty"`
+	Port           int           `json:"port,omitempty"`
+	Username       string        `json:"-"`
+	Password       string        `json:"-"`
+	ProxyRequired  bool          `json:"-"`
+	Nkey           string        `json:"-"`
+	Account        string        `json:"-"`
+	Users          []*User       `json:"-"`
+	AuthTimeout    float64       `json:"auth_timeout,omitempty"`
+	TLSConfig      *tls.Config   `json:"-"`
+	TLSTimeout     float64       `json:"tls_timeout,omitempty"`
+	TLSMap         bool          `json:"-"`
+	TLSPinnedCerts PinnedCertSet `json:"-"`
+	// When set to true, the server will perform the TLS handshake before
+	// sending the INFO protocol. For remote leafnodes that are not configured
+	// with a similar option, their connection will fail with some sort
+	// of timeout or EOF error since they are expecting to receive an
+	// INFO protocol first.
+	TLSHandshakeFirst bool `json:"-"`
+	// If TLSHandshakeFirst is true and this value is strictly positive,
+	// the server will wait for that amount of time for the TLS handshake
+	// to start before falling back to previous behavior of sending the
+	// INFO protocol first. It allows for a mix of newer remote leafnodes
+	// that can require a TLS handshake first, and older that can't.
+	TLSHandshakeFirstFallback time.Duration      `json:"-"`
+	Advertise                 string             `json:"-"`
+	NoAdvertise               bool               `json:"-"`
+	ReconnectInterval         time.Duration      `json:"-"`
+	WriteDeadline             time.Duration      `json:"-"`
+	WriteTimeout              WriteTimeoutPolicy `json:"-"`
 
 	// Compression options
 	Compression CompressionOpts `json:"-"`
@@ -175,10 +225,22 @@ type LeafNodeOpts struct {
 	// least" test).
 	MinVersion string
 
+	// Isolate subject interest from other leafnode connections, preventing
+	// east-west propagation.
+	IsolateLeafnodeInterest bool `json:"-"`
+
+	// DialTimeout is the amount of time the server will wait for the TCP
+	// connection to a remote server to be established. This is useful on high
+	// latency links where the default (DEFAULT_ROUTE_DIAL, 1 second) is not
+	// enough for the handshake to complete. It applies to all remotes, but can
+	// be overridden on a per-remote basis with RemoteLeafOpts.DialTimeout.
+	// If not set (or <= 0), DEFAULT_ROUTE_DIAL is used.
+	DialTimeout time.Duration `json:"-"`
+
 	// Not exported, for tests.
-	resolver    netResolver
-	dialTimeout time.Duration
-	connDelay   time.Duration
+	resolver  netResolver
+	connDelay time.Duration
+	dialer    leafNodeDialer
 
 	// Snapshot of configured TLS options.
 	tlsConfigOpts *TLSConfigOpts
@@ -205,6 +267,18 @@ type RemoteLeafOpts struct {
 	DenyImports       []string         `json:"-"`
 	DenyExports       []string         `json:"-"`
 
+	// FirstInfoTimeout is the amount of time the server will wait for the
+	// initial INFO protocol from the remote server before closing the
+	// connection.
+	FirstInfoTimeout time.Duration `json:"-"`
+
+	// DialTimeout is the amount of time the server will wait for the TCP
+	// connection to this remote server to be established. This is useful on
+	// high latency links where the default is not enough for the handshake to
+	// complete. If not set (or <= 0), the server-wide LeafNodeOpts.DialTimeout
+	// is used, which itself defaults to DEFAULT_ROUTE_DIAL (1 second).
+	DialTimeout time.Duration `json:"-"`
+
 	// Compression options for this remote. Each remote could have a different
 	// setting and also be different from the LeafNode options.
 	Compression CompressionOpts `json:"-"`
@@ -218,6 +292,18 @@ type RemoteLeafOpts struct {
 		NoMasking   bool `json:"-"`
 	}
 
+	// HTTP Proxy configuration for WebSocket connections
+	Proxy struct {
+		// URL of the HTTP proxy server (e.g., "http://proxy.example.com:8080")
+		URL string `json:"-"`
+		// Username for proxy authentication
+		Username string `json:"-"`
+		// Password for proxy authentication
+		Password string `json:"-"`
+		// Timeout for proxy connection
+		Timeout time.Duration `json:"-"`
+	}
+
 	tlsConfigOpts *TLSConfigOpts
 
 	// If we are clustered and our local account has JetStream, if apps are accessing
@@ -225,13 +311,83 @@ type RemoteLeafOpts struct {
 	// not be able to work. This tells the system to migrate the leaders away from this server.
 	// This only changes leader for R>1 assets.
 	JetStreamClusterMigrate bool `json:"jetstream_cluster_migrate,omitempty"`
+
+	// If JetStreamClusterMigrate is set to true, this is the time after which the leader
+	// will be migrated away from this server if still disconnected.
+	JetStreamClusterMigrateDelay time.Duration `json:"jetstream_cluster_migrate_delay,omitempty"`
+
+	// LocalIsolation isolates this remote from east-west subject interest originating locally.
+	LocalIsolation bool `json:"local_isolation,omitempty"`
+
+	// RequestIsolation asks the remote side to isolate us from their east-west subject interest.
+	RequestIsolation bool `json:"request_isolation,omitempty"`
+
+	// If this is set to true, the connection to this remote will not be solicited.
+	// During a configuration reload, if this is changed from `false` to `true`, the
+	// existing connection will be closed and not solicited again (until it is changed
+	// to `false` again.
+	Disabled bool `json:"-"`
+
+	// If this is set to true, this remote will ignore any server leafnode URLs
+	// returned by the hub, allowing the user to fully manage the servers this
+	// remote can connect to.
+	IgnoreDiscoveredServers bool `json:"-"`
 }
 
+// Returns a string representation of this `RemoteLeafOpts` object, containing
+// the URLs (unredacted), the account (or "$G" if none is specified) and, if present,
+// the credentials filename.
+func (r *RemoteLeafOpts) name() string {
+	return generateRemoteLeafOptsName(r, false)
+}
+
+// Same than RemoteLeafOpts.name() but uses redacted URLs. This is to be used for logging.
+func (r *RemoteLeafOpts) safeName() string {
+	return generateRemoteLeafOptsName(r, true)
+}
+
+func generateRemoteLeafOptsName(r *RemoteLeafOpts, redacted bool) string {
+	acc := r.LocalAccount
+	if acc == _EMPTY_ {
+		acc = globalAccountName
+	}
+	var optional string
+	// There could be Credentials or NKey, not both (would be caught as a misconfig)
+	if c := r.Credentials; c != _EMPTY_ {
+		optional = fmt.Sprintf(", credentials=%q", c)
+	} else if nk := r.Nkey; nk != _EMPTY_ {
+		if redacted {
+			optional = ", nkey=\"[REDACTED]\""
+		} else {
+			optional = fmt.Sprintf(", nkey=%q", nk)
+		}
+	}
+	var urls []*url.URL
+	if redacted {
+		urls = redactURLList(r.URLs)
+	} else {
+		urls = r.URLs
+	}
+	return fmt.Sprintf("urls=%q, account=%q%s", urls, acc, optional)
+}
+
+// JSLimitOpts are active limits for the meta cluster
 type JSLimitOpts struct {
-	MaxRequestBatch int
-	MaxAckPending   int
-	MaxHAAssets     int
-	Duplicates      time.Duration
+	MaxRequestBatch           int           `json:"max_request_batch,omitempty"`             // MaxRequestBatch is the maximum amount of updates that can be sent in a batch
+	MaxAckPending             int           `json:"max_ack_pending,omitempty"`               // MaxAckPending is the server limit for maximum amount of outstanding Acks
+	MaxHAAssets               int           `json:"max_ha_assets,omitempty"`                 // MaxHAAssets is the maximum of Streams and Consumers that may have more than 1 replica
+	Duplicates                time.Duration `json:"max_duplicate_window,omitempty"`          // Duplicates is the maximum value for duplicate tracking on Streams
+	MaxBatchInflightPerStream int           `json:"max_batch_inflight_per_stream,omitempty"` // MaxBatchInflightPerStream is the maximum amount of open batches per stream
+	MaxBatchInflightTotal     int           `json:"max_batch_inflight_total,omitempty"`      // MaxBatchInflightTotal is the maximum amount of total open batches per server
+	MaxBatchSize              int           `json:"max_batch_size,omitempty"`                // MaxBatchSize is the maximum amount of messages allowed in a batch publish to a Stream
+	MaxBatchTimeout           time.Duration `json:"max_batch_timeout,omitempty"`             // MaxBatchTimeout is the maximum time to receive the commit message after receiving the first message of a batch
+}
+
+type JSTpmOpts struct {
+	KeysFile    string
+	KeyPassword string
+	SrkPassword string
+	Pcr         int
 }
 
 // AuthCallout option used to map external AuthN to NATS based AuthZ.
@@ -245,92 +401,112 @@ type AuthCallout struct {
 	// XKey is a public xkey for the authorization service.
 	// This will enable encryption for server requests and the authorization service responses.
 	XKey string
+	// AllowedAccounts that will be delegated to the auth service.
+	// If empty then all accounts will be delegated.
+	AllowedAccounts []string
 }
 
 // Options block for nats-server.
 // NOTE: This structure is no longer used for monitoring endpoints
 // and json tags are deprecated and may be removed in the future.
 type Options struct {
-	ConfigFile            string        `json:"-"`
-	ServerName            string        `json:"server_name"`
-	Host                  string        `json:"addr"`
-	Port                  int           `json:"port"`
-	DontListen            bool          `json:"dont_listen"`
-	ClientAdvertise       string        `json:"-"`
-	Trace                 bool          `json:"-"`
-	Debug                 bool          `json:"-"`
-	TraceVerbose          bool          `json:"-"`
-	NoLog                 bool          `json:"-"`
-	NoSigs                bool          `json:"-"`
-	NoSublistCache        bool          `json:"-"`
-	NoHeaderSupport       bool          `json:"-"`
-	DisableShortFirstPing bool          `json:"-"`
-	Logtime               bool          `json:"-"`
-	LogtimeUTC            bool          `json:"-"`
-	MaxConn               int           `json:"max_connections"`
-	MaxSubs               int           `json:"max_subscriptions,omitempty"`
-	MaxSubTokens          uint8         `json:"-"`
-	Nkeys                 []*NkeyUser   `json:"-"`
-	Users                 []*User       `json:"-"`
-	Accounts              []*Account    `json:"-"`
-	NoAuthUser            string        `json:"-"`
-	SystemAccount         string        `json:"-"`
-	NoSystemAccount       bool          `json:"-"`
-	Username              string        `json:"-"`
-	Password              string        `json:"-"`
-	Authorization         string        `json:"-"`
-	AuthCallout           *AuthCallout  `json:"-"`
-	PingInterval          time.Duration `json:"ping_interval"`
-	MaxPingsOut           int           `json:"ping_max"`
-	HTTPHost              string        `json:"http_host"`
-	HTTPPort              int           `json:"http_port"`
-	HTTPBasePath          string        `json:"http_base_path"`
-	HTTPSPort             int           `json:"https_port"`
-	AuthTimeout           float64       `json:"auth_timeout"`
-	MaxControlLine        int32         `json:"max_control_line"`
-	MaxPayload            int32         `json:"max_payload"`
-	MaxPending            int64         `json:"max_pending"`
-	Cluster               ClusterOpts   `json:"cluster,omitempty"`
-	Gateway               GatewayOpts   `json:"gateway,omitempty"`
-	LeafNode              LeafNodeOpts  `json:"leaf,omitempty"`
-	JetStream             bool          `json:"jetstream"`
-	JetStreamMaxMemory    int64         `json:"-"`
-	JetStreamMaxStore     int64         `json:"-"`
-	JetStreamDomain       string        `json:"-"`
-	JetStreamExtHint      string        `json:"-"`
-	JetStreamKey          string        `json:"-"`
-	JetStreamOldKey       string        `json:"-"`
-	JetStreamCipher       StoreCipher   `json:"-"`
-	JetStreamUniqueTag    string
-	JetStreamLimits       JSLimitOpts
-	JetStreamMaxCatchup   int64
-	StoreDir              string            `json:"-"`
-	SyncInterval          time.Duration     `json:"-"`
-	SyncAlways            bool              `json:"-"`
-	JsAccDefaultDomain    map[string]string `json:"-"` // account to domain name mapping
-	Websocket             WebsocketOpts     `json:"-"`
-	MQTT                  MQTTOpts          `json:"-"`
-	ProfPort              int               `json:"-"`
-	ProfBlockRate         int               `json:"-"`
-	PidFile               string            `json:"-"`
-	PortsFileDir          string            `json:"-"`
-	LogFile               string            `json:"-"`
-	LogSizeLimit          int64             `json:"-"`
-	LogMaxFiles           int64             `json:"-"`
-	Syslog                bool              `json:"-"`
-	RemoteSyslog          string            `json:"-"`
-	Routes                []*url.URL        `json:"-"`
-	RoutesStr             string            `json:"-"`
-	TLSTimeout            float64           `json:"tls_timeout"`
-	TLS                   bool              `json:"-"`
-	TLSVerify             bool              `json:"-"`
-	TLSMap                bool              `json:"-"`
-	TLSCert               string            `json:"-"`
-	TLSKey                string            `json:"-"`
-	TLSCaCert             string            `json:"-"`
-	TLSConfig             *tls.Config       `json:"-"`
-	TLSPinnedCerts        PinnedCertSet     `json:"-"`
-	TLSRateLimit          int64             `json:"-"`
+	ConfigFile      string `json:"-"`
+	ServerName      string `json:"server_name"`
+	Host            string `json:"addr"`
+	Port            int    `json:"port"`
+	DontListen      bool   `json:"dont_listen"`
+	ClientAdvertise string `json:"-"`
+	Trace           bool   `json:"-"`
+	Debug           bool   `json:"-"`
+	TraceVerbose    bool   `json:"-"`
+
+	// TraceHeaders if true will only trace message headers, not the payload.
+	TraceHeaders               bool          `json:"-"`
+	NoLog                      bool          `json:"-"`
+	NoSigs                     bool          `json:"-"`
+	NoSublistCache             bool          `json:"-"`
+	NoHeaderSupport            bool          `json:"-"`
+	DisableShortFirstPing      bool          `json:"-"`
+	Logtime                    bool          `json:"-"`
+	LogtimeUTC                 bool          `json:"-"`
+	MaxConn                    int           `json:"max_connections"`
+	MaxSubs                    int           `json:"max_subscriptions,omitempty"`
+	MaxSubTokens               uint8         `json:"-"`
+	Nkeys                      []*NkeyUser   `json:"-"`
+	Users                      []*User       `json:"-"`
+	Accounts                   []*Account    `json:"-"`
+	NoAuthUser                 string        `json:"-"`
+	DefaultSentinel            string        `json:"-"`
+	SystemAccount              string        `json:"-"`
+	NoSystemAccount            bool          `json:"-"`
+	Username                   string        `json:"-"`
+	Password                   string        `json:"-"`
+	ProxyRequired              bool          `json:"-"`
+	ProxyProtocol              bool          `json:"-"`
+	Authorization              string        `json:"-"`
+	AuthCallout                *AuthCallout  `json:"-"`
+	PingInterval               time.Duration `json:"ping_interval"`
+	MaxPingsOut                int           `json:"ping_max"`
+	HTTPHost                   string        `json:"http_host"`
+	HTTPPort                   int           `json:"http_port"`
+	HTTPBasePath               string        `json:"http_base_path"`
+	HTTPSPort                  int           `json:"https_port"`
+	AuthTimeout                float64       `json:"auth_timeout"`
+	MaxControlLine             int32         `json:"max_control_line"`
+	MaxPayload                 int32         `json:"max_payload"`
+	MaxPending                 int64         `json:"max_pending"`
+	NoFastProducerStall        bool          `json:"-"`
+	Cluster                    ClusterOpts   `json:"cluster,omitempty"`
+	Gateway                    GatewayOpts   `json:"gateway,omitempty"`
+	LeafNode                   LeafNodeOpts  `json:"leaf,omitempty"`
+	JetStream                  bool          `json:"jetstream"`
+	NoJetStreamStrict          bool          `json:"-"` // Strict by default.
+	JetStreamMaxMemory         int64         `json:"-"`
+	JetStreamMaxStore          int64         `json:"-"`
+	JetStreamDomain            string        `json:"-"`
+	JetStreamExtHint           string        `json:"-"`
+	JetStreamKey               string        `json:"-"`
+	JetStreamOldKey            string        `json:"-"`
+	JetStreamCipher            StoreCipher   `json:"-"`
+	JetStreamUniqueTag         string
+	JetStreamLimits            JSLimitOpts
+	JetStreamTpm               JSTpmOpts
+	JetStreamMaxCatchup        int64
+	JetStreamRequestQueueLimit int64
+	JetStreamInfoQueueLimit    int64
+	JetStreamMetaCompact       uint64
+	JetStreamMetaCompactSize   uint64
+	JetStreamMetaCompactSync   bool
+	JetStreamConcurrentIOs     int
+	StreamMaxBufferedMsgs      int               `json:"-"`
+	StreamMaxBufferedSize      int64             `json:"-"`
+	StoreDir                   string            `json:"-"`
+	SyncInterval               time.Duration     `json:"-"`
+	SyncAlways                 bool              `json:"-"`
+	JsAccDefaultDomain         map[string]string `json:"-"` // account to domain name mapping
+	Websocket                  WebsocketOpts     `json:"-"`
+	MQTT                       MQTTOpts          `json:"-"`
+	ProfPort                   int               `json:"-"`
+	ProfBlockRate              int               `json:"-"`
+	PidFile                    string            `json:"-"`
+	PortsFileDir               string            `json:"-"`
+	LogFile                    string            `json:"-"`
+	LogSizeLimit               int64             `json:"-"`
+	LogMaxFiles                int64             `json:"-"`
+	Syslog                     bool              `json:"-"`
+	RemoteSyslog               string            `json:"-"`
+	Routes                     []*url.URL        `json:"-"`
+	RoutesStr                  string            `json:"-"`
+	TLSTimeout                 float64           `json:"tls_timeout"`
+	TLS                        bool              `json:"-"`
+	TLSVerify                  bool              `json:"-"`
+	TLSMap                     bool              `json:"-"`
+	TLSCert                    string            `json:"-"`
+	TLSKey                     string            `json:"-"`
+	TLSCaCert                  string            `json:"-"`
+	TLSConfig                  *tls.Config       `json:"-"`
+	TLSPinnedCerts             PinnedCertSet     `json:"-"`
+	TLSRateLimit               int64             `json:"-"`
 	// When set to true, the server will perform the TLS handshake before
 	// sending the INFO protocol. For clients that are not configured
 	// with a similar option, their connection will fail with some sort
@@ -342,12 +518,13 @@ type Options struct {
 	// to start before falling back to previous behavior of sending the
 	// INFO protocol first. It allows for a mix of newer clients that can
 	// require a TLS handshake first, and older clients that can't.
-	TLSHandshakeFirstFallback time.Duration `json:"-"`
-	AllowNonTLS               bool          `json:"-"`
-	WriteDeadline             time.Duration `json:"-"`
-	MaxClosedClients          int           `json:"-"`
-	LameDuckDuration          time.Duration `json:"-"`
-	LameDuckGracePeriod       time.Duration `json:"-"`
+	TLSHandshakeFirstFallback time.Duration      `json:"-"`
+	AllowNonTLS               bool               `json:"-"`
+	WriteDeadline             time.Duration      `json:"-"`
+	WriteTimeout              WriteTimeoutPolicy `json:"-"`
+	MaxClosedClients          int                `json:"-"`
+	LameDuckDuration          time.Duration      `json:"-"`
+	LameDuckGracePeriod       time.Duration      `json:"-"`
 
 	// MaxTracedMsgLen is the maximum printable length for traced messages.
 	MaxTracedMsgLen int `json:"-"`
@@ -386,9 +563,18 @@ type Options struct {
 	// and used as a filter criteria for some system requests.
 	Tags jwt.TagList `json:"-"`
 
+	// Metadata describing the server. They will be included in 'Z' responses.
+	Metadata map[string]string `json:"-"`
+
+	// FeatureFlags the server opts-in to (or opts-out of). They will be included in 'Z' responses.
+	FeatureFlags map[string]bool `json:"-"`
+
 	// OCSPConfig enables OCSP Stapling in the server.
 	OCSPConfig    *OCSPConfig
 	tlsConfigOpts *TLSConfigOpts
+
+	// Proxies configuration.
+	Proxies *ProxiesConfig
 
 	// private fields, used to know if bool options are explicitly
 	// defined in config and/or command line params.
@@ -402,7 +588,7 @@ type Options struct {
 
 	// private fields, used for testing
 	gatewaysSolicitDelay time.Duration
-	routeProto           int
+	overrideProto        int
 
 	// JetStream
 	maxMemSet   bool
@@ -414,6 +600,9 @@ type Options struct {
 
 	// Used to mark that we had a top level authorization block.
 	authBlockDefined bool
+
+	// configDigest represents the state of configuration.
+	configDigest string
 }
 
 // WebsocketOpts are options for websocket
@@ -433,6 +622,26 @@ type WebsocketOpts struct {
 	// will be treated as JWT during CONNECT phase as long as
 	// "jwt" specified in the CONNECT options is missing or empty.
 	JWTCookie string
+
+	// Name of the cookie, which if present in WebSocket upgrade headers,
+	// will be treated as Username during CONNECT phase as long as
+	// "user" specified in the CONNECT options is missing or empty.
+	UsernameCookie string
+
+	// Name of the cookie, which if present in WebSocket upgrade headers,
+	// will be treated as Password during CONNECT phase as long as
+	// "pass" specified in the CONNECT options is missing or empty.
+	PasswordCookie string
+
+	// Name of the cookie, which if present in WebSocket upgrade headers,
+	// will be treated as Token during CONNECT phase as long as
+	// "auth_token" specified in the CONNECT options is missing or empty.
+	// Note that when this is useful for passing a JWT to an cuth callout
+	// when the server uses delegated authentication ("operator mode") or
+	// when using delegated authentication, but the auth callout validates some
+	// other JWT or string. Note that this does map to an actual server-wide
+	// "auth_token", note that using it for that purpose is greatly discouraged.
+	TokenCookie string
 
 	// Authentication section. If anything is configured in this section,
 	// it will override the authorization configuration of regular clients.
@@ -477,6 +686,15 @@ type WebsocketOpts struct {
 	// and write the response back to the client. This include the
 	// time needed for the TLS Handshake.
 	HandshakeTimeout time.Duration
+
+	// How often to send pings to WebSocket clients. When set to a non-zero
+	// duration, this overrides the default PingInterval for WebSocket connections.
+	// If not set or zero, the server's default PingInterval will be used.
+	PingInterval time.Duration
+
+	// Headers to be added to the upgrade response.
+	// Useful for adding custom headers like Strict-Transport-Security.
+	Headers map[string]string
 
 	// Snapshot of configured TLS options.
 	tlsConfigOpts *TLSConfigOpts
@@ -549,6 +767,9 @@ type MQTTOpts struct {
 	// option is applied only to new MQTT subscriptions (or sessions for
 	// PubRels).
 	AckWait time.Duration
+
+	// JSAPITimeout defines timeout for JetStream api calls (default is 5 seconds)
+	JSAPITimeout time.Duration
 
 	// MaxAckPending is the amount of QoS 1 and 2 messages (combined) the server
 	// can send to a subscription without receiving any PUBACK for those
@@ -644,6 +865,8 @@ type authorization struct {
 	token string
 	nkey  string
 	acc   string
+	// If connection must come through proxy
+	proxyRequired bool
 	// Multiple Nkeys/Users
 	nkeys              []*NkeyUser
 	users              []*User
@@ -656,25 +879,29 @@ type authorization struct {
 // TLSConfigOpts holds the parsed tls config information,
 // used with flag parsing
 type TLSConfigOpts struct {
-	CertFile          string
-	KeyFile           string
-	CaFile            string
-	Verify            bool
-	Insecure          bool
-	Map               bool
-	TLSCheckKnownURLs bool
-	HandshakeFirst    bool          // Indicate that the TLS handshake should occur first, before sending the INFO protocol.
-	FallbackDelay     time.Duration // Where supported, indicates how long to wait for the handshake before falling back to sending the INFO protocol first.
-	Timeout           float64
-	RateLimit         int64
-	Ciphers           []uint16
-	CurvePreferences  []tls.CurveID
-	PinnedCerts       PinnedCertSet
-	CertStore         certstore.StoreType
-	CertMatchBy       certstore.MatchByType
-	CertMatch         string
-	OCSPPeerConfig    *certidp.OCSPPeerConfig
-	Certificates      []*TLSCertPairOpt
+	CertFile             string
+	KeyFile              string
+	CaFile               string
+	Verify               bool
+	Insecure             bool
+	Map                  bool
+	TLSCheckKnownURLs    bool
+	HandshakeFirst       bool          // Indicate that the TLS handshake should occur first, before sending the INFO protocol.
+	FallbackDelay        time.Duration // Where supported, indicates how long to wait for the handshake before falling back to sending the INFO protocol first.
+	Timeout              float64
+	RateLimit            int64
+	AllowInsecureCiphers bool
+	Ciphers              []uint16
+	CurvePreferences     []tls.CurveID
+	PinnedCerts          PinnedCertSet
+	CertStore            certstore.StoreType
+	CertMatchBy          certstore.MatchByType
+	CertMatch            string
+	CertMatchSkipInvalid bool
+	CaCertsMatch         []string
+	OCSPPeerConfig       *certidp.OCSPPeerConfig
+	Certificates         []*TLSCertPairOpt
+	MinVersion           uint16
 }
 
 // TLSCertPairOpt are the paths to a certificate and private key.
@@ -690,6 +917,17 @@ type OCSPConfig struct {
 
 	// OverrideURLs is the http URL endpoint used to get OCSP staples.
 	OverrideURLs []string
+}
+
+// ProxiesConfig represents the options of Proxies.
+type ProxiesConfig struct {
+	Trusted []*ProxyConfig
+}
+
+// ProxyConfig represents the options of Proxy.
+type ProxyConfig struct {
+	// Public key.
+	Key string
 }
 
 var tlsUsage = `
@@ -735,7 +973,7 @@ func ProcessConfigFile(configFile string) (*Options, error) {
 
 // token is an item parsed from the configuration.
 type token interface {
-	Value() interface{}
+	Value() any
 	Line() int
 	IsUsedVariable() bool
 	SourceFile() string
@@ -746,7 +984,7 @@ type token interface {
 // to be able to report the line number in case of an incorrect
 // configuration.
 // also stores the token in lastToken for use in convertPanicToError
-func unwrapValue(v interface{}, lastToken *token) (token, interface{}) {
+func unwrapValue(v any, lastToken *token) (token, any) {
 	switch tk := v.(type) {
 	case token:
 		if lastToken != nil {
@@ -788,10 +1026,10 @@ func convertPanicToError(lastToken *token, e *error) {
 
 // configureSystemAccount configures a system account
 // if present in the configuration.
-func configureSystemAccount(o *Options, m map[string]interface{}) (retErr error) {
+func configureSystemAccount(o *Options, m map[string]any) (retErr error) {
 	var lt token
 	defer convertPanicToError(&lt, &retErr)
-	configure := func(v interface{}) error {
+	configure := func(v any) error {
 		tk, v := unwrapValue(v, &lt)
 		sa, ok := v.(string)
 		if !ok {
@@ -829,10 +1067,32 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 	if configFile == _EMPTY_ {
 		return nil
 	}
-	m, err := conf.ParseFileWithChecks(configFile)
+	m, digest, err := conf.ParseFileWithChecksDigest(configFile)
 	if err != nil {
 		return err
 	}
+	o.configDigest = digest
+
+	return o.processConfigFile(configFile, m)
+}
+
+// ProcessConfigString is the same as ProcessConfigFile, but expects the
+// contents of the config file to be passed in rather than the file name.
+func (o *Options) ProcessConfigString(data string) error {
+	m, err := conf.ParseWithChecks(data)
+	if err != nil {
+		return err
+	}
+
+	return o.processConfigFile(_EMPTY_, m)
+}
+
+// ConfigDigest returns the digest representing the configuration.
+func (o *Options) ConfigDigest() string {
+	return o.configDigest
+}
+
+func (o *Options) processConfigFile(configFile string, m map[string]any) error {
 	// Collect all errors and warnings and report them all together.
 	errors := make([]error, 0)
 	warnings := make([]error, 0)
@@ -850,6 +1110,21 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 		o.processConfigFileLine(k, v, &errors, &warnings)
 	}
 
+	// Post-process: check auth callout allowed accounts against configured accounts.
+	if o.AuthCallout != nil {
+		accounts := make(map[string]struct{})
+		for _, acc := range o.Accounts {
+			accounts[acc.Name] = struct{}{}
+		}
+
+		for _, acc := range o.AuthCallout.AllowedAccounts {
+			if _, ok := accounts[acc]; !ok {
+				err := &configErr{nil, fmt.Sprintf("auth_callout allowed account %q not found in configured accounts", acc)}
+				errors = append(errors, err)
+			}
+		}
+	}
+
 	if len(errors) > 0 || len(warnings) > 0 {
 		return &processConfigErr{
 			errors:   errors,
@@ -860,7 +1135,7 @@ func (o *Options) ProcessConfigFile(configFile string) error {
 	return nil
 }
 
-func (o *Options) processConfigFileLine(k string, v interface{}, errors *[]error, warnings *[]error) {
+func (o *Options) processConfigFileLine(k string, v any, errors *[]error, warnings *[]error) {
 	var lt token
 	defer convertPanicToErrorList(&lt, errors)
 
@@ -879,30 +1154,41 @@ func (o *Options) processConfigFileLine(k string, v interface{}, errors *[]error
 	case "port":
 		o.Port = int(v.(int64))
 	case "server_name":
-		o.ServerName = v.(string)
+		sn := v.(string)
+		if strings.Contains(sn, " ") {
+			err := &configErr{tk, ErrServerNameHasSpaces.Error()}
+			*errors = append(*errors, err)
+			return
+		}
+		o.ServerName = sn
 	case "host", "net":
 		o.Host = v.(string)
 	case "debug":
 		o.Debug = v.(bool)
-		trackExplicitVal(o, &o.inConfig, "Debug", o.Debug)
+		trackExplicitVal(&o.inConfig, "Debug", o.Debug)
 	case "trace":
 		o.Trace = v.(bool)
-		trackExplicitVal(o, &o.inConfig, "Trace", o.Trace)
+		trackExplicitVal(&o.inConfig, "Trace", o.Trace)
 	case "trace_verbose":
 		o.TraceVerbose = v.(bool)
 		o.Trace = v.(bool)
-		trackExplicitVal(o, &o.inConfig, "TraceVerbose", o.TraceVerbose)
-		trackExplicitVal(o, &o.inConfig, "Trace", o.Trace)
+		trackExplicitVal(&o.inConfig, "TraceVerbose", o.TraceVerbose)
+		trackExplicitVal(&o.inConfig, "Trace", o.Trace)
+	case "trace_headers":
+		o.TraceHeaders = v.(bool)
+		o.Trace = v.(bool)
+		trackExplicitVal(&o.inConfig, "TraceHeaders", o.TraceHeaders)
+		trackExplicitVal(&o.inConfig, "Trace", o.Trace)
 	case "logtime":
 		o.Logtime = v.(bool)
-		trackExplicitVal(o, &o.inConfig, "Logtime", o.Logtime)
+		trackExplicitVal(&o.inConfig, "Logtime", o.Logtime)
 	case "logtime_utc":
 		o.LogtimeUTC = v.(bool)
-		trackExplicitVal(o, &o.inConfig, "LogtimeUTC", o.LogtimeUTC)
+		trackExplicitVal(&o.inConfig, "LogtimeUTC", o.LogtimeUTC)
 	case "mappings", "maps":
 		gacc := NewAccount(globalAccountName)
 		o.Accounts = append(o.Accounts, gacc)
-		err := parseAccountMappings(tk, gacc, errors, warnings)
+		err := parseAccountMappings(tk, gacc, errors)
 		if err != nil {
 			*errors = append(*errors, err)
 			return
@@ -915,8 +1201,10 @@ func (o *Options) processConfigFileLine(k string, v interface{}, errors *[]error
 			*errors = append(*errors, err)
 			return
 		}
+	case "default_sentinel":
+		o.DefaultSentinel = v.(string)
 	case "authorization":
-		auth, err := parseAuthorization(tk, o, errors, warnings)
+		auth, err := parseAuthorization(tk, errors, warnings)
 		if err != nil {
 			*errors = append(*errors, err)
 			return
@@ -924,6 +1212,7 @@ func (o *Options) processConfigFileLine(k string, v interface{}, errors *[]error
 		o.authBlockDefined = true
 		o.Username = auth.user
 		o.Password = auth.pass
+		o.ProxyRequired = auth.proxyRequired
 		o.Authorization = auth.token
 		o.AuthTimeout = auth.timeout
 		o.AuthCallout = auth.callout
@@ -1041,7 +1330,7 @@ func (o *Options) processConfigFileLine(k string, v interface{}, errors *[]error
 		o.LogMaxFiles = v.(int64)
 	case "syslog":
 		o.Syslog = v.(bool)
-		trackExplicitVal(o, &o.inConfig, "Syslog", o.Syslog)
+		trackExplicitVal(&o.inConfig, "Syslog", o.Syslog)
 	case "remote_syslog":
 		o.RemoteSyslog = v.(string)
 	case "pidfile", "pid_file":
@@ -1068,8 +1357,12 @@ func (o *Options) processConfigFileLine(k string, v interface{}, errors *[]error
 		o.MaxPayload = int32(v.(int64))
 	case "max_pending":
 		o.MaxPending = v.(int64)
+	case "proxy_protocol":
+		o.ProxyProtocol = v.(bool)
 	case "max_connections", "max_conn":
-		o.MaxConn = int(v.(int64))
+		if o.MaxConn = int(v.(int64)); o.MaxConn == 0 {
+			o.MaxConn = -1
+		}
 	case "max_traced_msg_len":
 		o.MaxTracedMsgLen = int(v.(int64))
 	case "max_subscriptions", "max_subs":
@@ -1122,7 +1415,7 @@ func (o *Options) processConfigFileLine(k string, v interface{}, errors *[]error
 			} else {
 				o.OCSPConfig = &OCSPConfig{Mode: OCSPModeNever}
 			}
-		case map[string]interface{}:
+		case map[string]any:
 			ocsp := &OCSPConfig{Mode: OCSPModeAuto}
 
 			for kk, kv := range vv {
@@ -1162,6 +1455,8 @@ func (o *Options) processConfigFileLine(k string, v interface{}, errors *[]error
 		o.AllowNonTLS = v.(bool)
 	case "write_deadline":
 		o.WriteDeadline = parseDuration("write_deadline", tk, v, errors, warnings)
+	case "write_timeout":
+		o.WriteTimeout = parseWriteDeadlinePolicy(tk, v.(string), errors)
 	case "lame_duck_duration":
 		dur, err := time.ParseDuration(v.(string))
 		if err != nil {
@@ -1195,6 +1490,22 @@ func (o *Options) processConfigFileLine(k string, v interface{}, errors *[]error
 			opFiles = append(opFiles, v)
 		case []string:
 			opFiles = append(opFiles, v...)
+		case []any:
+			for _, t := range v {
+				if token, ok := t.(token); ok {
+					if v, ok := token.Value().(string); ok {
+						opFiles = append(opFiles, v)
+					} else {
+						err := &configErr{tk, fmt.Sprintf("error parsing operators: unsupported type %T where string is expected", token)}
+						*errors = append(*errors, err)
+						break
+					}
+				} else {
+					err := &configErr{tk, fmt.Sprintf("error parsing operators: unsupported type %T", t)}
+					*errors = append(*errors, err)
+					break
+				}
+			}
 		default:
 			err := &configErr{tk, fmt.Sprintf("error parsing operators: unsupported type %T", v)}
 			*errors = append(*errors, err)
@@ -1249,7 +1560,7 @@ func (o *Options) processConfigFileLine(k string, v interface{}, errors *[]error
 					o.AccountResolver = ur
 				}
 			}
-		case map[string]interface{}:
+		case map[string]any:
 			del := false
 			hdel := false
 			hdel_set := false
@@ -1378,7 +1689,7 @@ func (o *Options) processConfigFileLine(k string, v interface{}, errors *[]error
 		// be used as a client connection, we need to set RootCAs.
 		o.AccountResolverTLSConfig.RootCAs = tlsConfig.ClientCAs
 	case "resolver_preload":
-		mp, ok := v.(map[string]interface{})
+		mp, ok := v.(map[string]any)
 		if !ok {
 			err := &configErr{tk, "preload should be a map of account_public_key:account_jwt"}
 			*errors = append(*errors, err)
@@ -1410,7 +1721,7 @@ func (o *Options) processConfigFileLine(k string, v interface{}, errors *[]error
 			for _, mv := range v {
 				o.resolverPinnedAccounts[mv] = struct{}{}
 			}
-		case []interface{}:
+		case []any:
 			o.resolverPinnedAccounts = make(map[string]struct{})
 			for _, mv := range v {
 				tk, mv = unwrapValue(mv, &lt)
@@ -1444,7 +1755,7 @@ func (o *Options) processConfigFileLine(k string, v interface{}, errors *[]error
 			o.TrustedKeys = []string{v}
 		case []string:
 			o.TrustedKeys = v
-		case []interface{}:
+		case []any:
 			keys := make([]string, 0, len(v))
 			for _, mv := range v {
 				tk, mv = unwrapValue(mv, &lt)
@@ -1489,7 +1800,7 @@ func (o *Options) processConfigFileLine(k string, v interface{}, errors *[]error
 			o.Tags.Add(v)
 		case []string:
 			o.Tags.Add(v...)
-		case []interface{}:
+		case []any:
 			for _, t := range v {
 				if token, ok := t.(token); ok {
 					if ts, ok := token.Value().(string); ok {
@@ -1510,8 +1821,49 @@ func (o *Options) processConfigFileLine(k string, v interface{}, errors *[]error
 			*errors = append(*errors, err)
 			return
 		}
+	case "server_metadata":
+		var err error
+		switch v := v.(type) {
+		case map[string]any:
+			for mk, mv := range v {
+				tk, mv = unwrapValue(mv, &lt)
+				if o.Metadata == nil {
+					o.Metadata = make(map[string]string)
+				}
+				o.Metadata[mk] = mv.(string)
+			}
+		default:
+			err = &configErr{tk, fmt.Sprintf("error parsing metadata: unsupported type %T", v)}
+		}
+		if err != nil {
+			*errors = append(*errors, err)
+			return
+		}
+	case "feature_flags":
+		var err error
+		switch v := v.(type) {
+		case map[string]any:
+			for mk, mv := range v {
+				tk, mv = unwrapValue(mv, &lt)
+				b, ok := mv.(bool)
+				if !ok {
+					err = &configErr{tk, fmt.Sprintf("error parsing feature flag %q: expected bool, got %T", mk, mv)}
+					break
+				}
+				if o.FeatureFlags == nil {
+					o.FeatureFlags = make(map[string]bool)
+				}
+				o.FeatureFlags[mk] = b
+			}
+		default:
+			err = &configErr{tk, fmt.Sprintf("error parsing feature flags: unsupported type %T", v)}
+		}
+		if err != nil {
+			*errors = append(*errors, err)
+			return
+		}
 	case "default_js_domain":
-		vv, ok := v.(map[string]interface{})
+		vv, ok := v.(map[string]any)
 		if !ok {
 			*errors = append(*errors, &configErr{tk, fmt.Sprintf("error default_js_domain config: unsupported type %T", v)})
 			return
@@ -1536,7 +1888,7 @@ func (o *Options) processConfigFileLine(k string, v interface{}, errors *[]error
 				pc.Type = NONE
 				o.OCSPCacheConfig = pc
 			}
-		case map[string]interface{}:
+		case map[string]any:
 			pc, err := parseOCSPResponseCache(v)
 			if err != nil {
 				*errors = append(*errors, err)
@@ -1550,6 +1902,17 @@ func (o *Options) processConfigFileLine(k string, v interface{}, errors *[]error
 			*errors = append(*errors, err)
 			return
 		}
+	case "no_fast_producer_stall":
+		o.NoFastProducerStall = v.(bool)
+	case "max_closed_clients":
+		o.MaxClosedClients = int(v.(int64))
+	case "proxies":
+		proxies, err := parseProxies(tk, errors)
+		if err != nil {
+			*errors = append(*errors, err)
+			return
+		}
+		o.Proxies = proxies
 	default:
 		if au := atomic.LoadInt32(&allowUnknownTopLevelField); au == 0 && !tk.IsUsedVariable() {
 			err := &unknownConfigFieldErr{
@@ -1574,7 +1937,7 @@ func setupUsersAndNKeysDuplicateCheckMap(o *Options) map[string]struct{} {
 	return unames
 }
 
-func parseDuration(field string, tk token, v interface{}, errors *[]error, warnings *[]error) time.Duration {
+func parseDuration(field string, tk token, v any, errors *[]error, warnings *[]error) time.Duration {
 	if wd, ok := v.(string); ok {
 		if dur, err := time.ParseDuration(wd); err != nil {
 			err := &configErr{tk, fmt.Sprintf("error parsing %s: %v", field, err)}
@@ -1598,7 +1961,22 @@ func parseDuration(field string, tk token, v interface{}, errors *[]error, warni
 	}
 }
 
-func trackExplicitVal(opts *Options, pm *map[string]bool, name string, val bool) {
+func parseWriteDeadlinePolicy(tk token, v string, errors *[]error) WriteTimeoutPolicy {
+	switch v {
+	case "default":
+		return WriteTimeoutPolicyDefault
+	case "close":
+		return WriteTimeoutPolicyClose
+	case "retry":
+		return WriteTimeoutPolicyRetry
+	default:
+		err := &configErr{tk, "write_timeout must be 'default', 'close' or 'retry'"}
+		*errors = append(*errors, err)
+		return WriteTimeoutPolicyDefault
+	}
+}
+
+func trackExplicitVal(pm *map[string]bool, name string, val bool) {
 	m := *pm
 	if m == nil {
 		m = make(map[string]bool)
@@ -1614,7 +1992,7 @@ type hostPort struct {
 }
 
 // parseListen will parse listen option which is replacing host/net and port
-func parseListen(v interface{}) (*hostPort, error) {
+func parseListen(v any) (*hostPort, error) {
 	hp := &hostPort{}
 	switch vv := v.(type) {
 	// Only a port
@@ -1637,12 +2015,12 @@ func parseListen(v interface{}) (*hostPort, error) {
 }
 
 // parseCluster will parse the cluster config.
-func parseCluster(v interface{}, opts *Options, errors *[]error, warnings *[]error) error {
+func parseCluster(v any, opts *Options, errors *[]error, warnings *[]error) error {
 	var lt token
 	defer convertPanicToErrorList(&lt, errors)
 
 	tk, v := unwrapValue(v, &lt)
-	cm, ok := v.(map[string]interface{})
+	cm, ok := v.(map[string]any)
 	if !ok {
 		return &configErr{tk, fmt.Sprintf("Expected map to define cluster, got %T", v)}
 	}
@@ -1652,7 +2030,13 @@ func parseCluster(v interface{}, opts *Options, errors *[]error, warnings *[]err
 		tk, mv = unwrapValue(mv, &lt)
 		switch strings.ToLower(mk) {
 		case "name":
-			opts.Cluster.Name = mv.(string)
+			cn := mv.(string)
+			if strings.Contains(cn, " ") {
+				err := &configErr{tk, ErrClusterNameHasSpaces.Error()}
+				*errors = append(*errors, err)
+				continue
+			}
+			opts.Cluster.Name = cn
 		case "listen":
 			hp, err := parseListen(mv)
 			if err != nil {
@@ -1667,7 +2051,7 @@ func parseCluster(v interface{}, opts *Options, errors *[]error, warnings *[]err
 		case "host", "net":
 			opts.Cluster.Host = mv.(string)
 		case "authorization":
-			auth, err := parseAuthorization(tk, opts, errors, warnings)
+			auth, err := parseAuthorization(tk, errors, warnings)
 			if err != nil {
 				*errors = append(*errors, err)
 				continue
@@ -1693,6 +2077,10 @@ func parseCluster(v interface{}, opts *Options, errors *[]error, warnings *[]err
 			opts.Cluster.AuthTimeout = auth.timeout
 
 			if auth.defaultPermissions != nil {
+				if err := checkClusterPermissionSubjects(auth.defaultPermissions); err != nil {
+					*errors = append(*errors, &configErr{tk, err.Error()})
+					continue
+				}
 				err := &configWarningErr{
 					field: mk,
 					configErr: configErr{
@@ -1708,7 +2096,7 @@ func parseCluster(v interface{}, opts *Options, errors *[]error, warnings *[]err
 				}
 			}
 		case "routes":
-			ra := mv.([]interface{})
+			ra := mv.([]any)
 			routes, errs := parseURLs(ra, "route", warnings)
 			if errs != nil {
 				*errors = append(*errors, errs...)
@@ -1731,11 +2119,13 @@ func parseCluster(v interface{}, opts *Options, errors *[]error, warnings *[]err
 			opts.Cluster.Advertise = mv.(string)
 		case "no_advertise":
 			opts.Cluster.NoAdvertise = mv.(bool)
-			trackExplicitVal(opts, &opts.inConfig, "Cluster.NoAdvertise", opts.Cluster.NoAdvertise)
+			trackExplicitVal(&opts.inConfig, "Cluster.NoAdvertise", opts.Cluster.NoAdvertise)
 		case "connect_retries":
 			opts.Cluster.ConnectRetries = int(mv.(int64))
+		case "connect_backoff":
+			opts.Cluster.ConnectBackoff = mv.(bool)
 		case "permissions":
-			perms, err := parseUserPermissions(mv, errors, warnings)
+			perms, err := parseUserPermissions(mv, errors)
 			if err != nil {
 				*errors = append(*errors, err)
 				continue
@@ -1746,12 +2136,16 @@ func parseCluster(v interface{}, opts *Options, errors *[]error, warnings *[]err
 				*errors = append(*errors, err)
 				continue
 			}
+			if err := checkClusterPermissionSubjects(perms); err != nil {
+				*errors = append(*errors, &configErr{tk, err.Error()})
+				continue
+			}
 			// This will possibly override permissions that were define in auth block
 			setClusterPermissions(&opts.Cluster, perms)
 		case "pool_size":
 			opts.Cluster.PoolSize = int(mv.(int64))
 		case "accounts":
-			opts.Cluster.PinnedAccounts, _ = parseStringArray("accounts", tk, &lt, mv, errors, warnings)
+			opts.Cluster.PinnedAccounts, _ = parseStringArray("accounts", tk, &lt, mv, errors)
 		case "compression":
 			if err := parseCompression(&opts.Cluster.Compression, CompressionS2Fast, tk, mk, mv); err != nil {
 				*errors = append(*errors, err)
@@ -1764,6 +2158,10 @@ func parseCluster(v interface{}, opts *Options, errors *[]error, warnings *[]err
 			}
 		case "ping_max":
 			opts.Cluster.MaxPingsOut = int(mv.(int64))
+		case "write_deadline":
+			opts.Cluster.WriteDeadline = parseDuration("write_deadline", tk, mv, errors, warnings)
+		case "write_timeout":
+			opts.Cluster.WriteTimeout = parseWriteDeadlinePolicy(tk, mv.(string), errors)
 		default:
 			if !tk.IsUsedVariable() {
 				err := &unknownConfigFieldErr{
@@ -1783,7 +2181,7 @@ func parseCluster(v interface{}, opts *Options, errors *[]error, warnings *[]err
 // The parameter `chosenModeForOn` indicates which compression mode to use
 // when the user selects "on" (or enabled, true, etc..). This is because
 // we may have different defaults depending on where the compression is used.
-func parseCompression(c *CompressionOpts, chosenModeForOn string, tk token, mk string, mv interface{}) (retErr error) {
+func parseCompression(c *CompressionOpts, chosenModeForOn string, tk token, mk string, mv any) (retErr error) {
 	var lt token
 	defer convertPanicToError(&lt, &retErr)
 
@@ -1797,14 +2195,14 @@ func parseCompression(c *CompressionOpts, chosenModeForOn string, tk token, mk s
 		} else {
 			c.Mode = CompressionOff
 		}
-	case map[string]interface{}:
+	case map[string]any:
 		for mk, mv := range mv {
 			tk, mv = unwrapValue(mv, &lt)
 			switch strings.ToLower(mk) {
 			case "mode":
 				c.Mode = mv.(string)
 			case "rtt_thresholds", "thresholds", "rtts", "rtt":
-				for _, iv := range mv.([]interface{}) {
+				for _, iv := range mv.([]any) {
 					_, mv := unwrapValue(iv, &lt)
 					dur, err := time.ParseDuration(mv.(string))
 					if err != nil {
@@ -1824,7 +2222,7 @@ func parseCompression(c *CompressionOpts, chosenModeForOn string, tk token, mk s
 	return nil
 }
 
-func parseURLs(a []interface{}, typ string, warnings *[]error) (urls []*url.URL, errors []error) {
+func parseURLs(a []any, typ string, warnings *[]error) (urls []*url.URL, errors []error) {
 	urls = make([]*url.URL, 0, len(a))
 	var lt token
 	defer convertPanicToErrorList(&lt, &errors)
@@ -1868,12 +2266,12 @@ func parseURL(u string, typ string) (*url.URL, error) {
 	return url, nil
 }
 
-func parseGateway(v interface{}, o *Options, errors *[]error, warnings *[]error) error {
+func parseGateway(v any, o *Options, errors *[]error, warnings *[]error) error {
 	var lt token
 	defer convertPanicToErrorList(&lt, errors)
 
 	tk, v := unwrapValue(v, &lt)
-	gm, ok := v.(map[string]interface{})
+	gm, ok := v.(map[string]any)
 	if !ok {
 		return &configErr{tk, fmt.Sprintf("Expected gateway to be a map, got %T", v)}
 	}
@@ -1882,7 +2280,13 @@ func parseGateway(v interface{}, o *Options, errors *[]error, warnings *[]error)
 		tk, mv = unwrapValue(mv, &lt)
 		switch strings.ToLower(mk) {
 		case "name":
-			o.Gateway.Name = mv.(string)
+			gn := mv.(string)
+			if strings.Contains(gn, " ") {
+				err := &configErr{tk, ErrGatewayNameHasSpaces.Error()}
+				*errors = append(*errors, err)
+				continue
+			}
+			o.Gateway.Name = gn
 		case "listen":
 			hp, err := parseListen(mv)
 			if err != nil {
@@ -1897,7 +2301,7 @@ func parseGateway(v interface{}, o *Options, errors *[]error, warnings *[]error)
 		case "host", "net":
 			o.Gateway.Host = mv.(string)
 		case "authorization":
-			auth, err := parseAuthorization(tk, o, errors, warnings)
+			auth, err := parseAuthorization(tk, errors, warnings)
 			if err != nil {
 				*errors = append(*errors, err)
 				continue
@@ -1936,6 +2340,8 @@ func parseGateway(v interface{}, o *Options, errors *[]error, warnings *[]error)
 			o.Gateway.Advertise = mv.(string)
 		case "connect_retries":
 			o.Gateway.ConnectRetries = int(mv.(int64))
+		case "connect_backoff":
+			o.Gateway.ConnectBackoff = mv.(bool)
 		case "gateways":
 			gateways, err := parseGateways(mv, errors, warnings)
 			if err != nil {
@@ -1944,6 +2350,10 @@ func parseGateway(v interface{}, o *Options, errors *[]error, warnings *[]error)
 			o.Gateway.Gateways = gateways
 		case "reject_unknown", "reject_unknown_cluster":
 			o.Gateway.RejectUnknown = mv.(bool)
+		case "write_deadline":
+			o.Gateway.WriteDeadline = parseDuration("write_deadline", tk, mv, errors, warnings)
+		case "write_timeout":
+			o.Gateway.WriteTimeout = parseWriteDeadlinePolicy(tk, mv.(string), errors)
 		default:
 			if !tk.IsUsedVariable() {
 				err := &unknownConfigFieldErr{
@@ -1965,7 +2375,7 @@ var defaultJSAccountTiers = map[string]JetStreamAccountLimits{_EMPTY_: dynamicJS
 
 // Parses jetstream account limits for an account. Simple setup with boolen is allowed, and we will
 // use dynamic account limits.
-func parseJetStreamForAccount(v interface{}, acc *Account, errors *[]error, warnings *[]error) error {
+func parseJetStreamForAccount(v any, acc *Account, errors *[]error) error {
 	var lt token
 
 	tk, v := unwrapValue(v, &lt)
@@ -1985,7 +2395,7 @@ func parseJetStreamForAccount(v interface{}, acc *Account, errors *[]error, warn
 		default:
 			return &configErr{tk, fmt.Sprintf("Expected 'enabled' or 'disabled' for string value, got '%s'", vv)}
 		}
-	case map[string]interface{}:
+	case map[string]any:
 		jsLimits := JetStreamAccountLimits{-1, -1, -1, -1, -1, -1, -1, false}
 		for mk, mv := range vv {
 			tk, mv = unwrapValue(mv, &lt)
@@ -2038,6 +2448,19 @@ func parseJetStreamForAccount(v interface{}, acc *Account, errors *[]error, warn
 					return &configErr{tk, fmt.Sprintf("Expected a parseable size for %q, got %v", mk, mv)}
 				}
 				jsLimits.MaxAckPending = int(vv)
+			case "cluster_traffic":
+				vv, ok := mv.(string)
+				if !ok {
+					return &configErr{tk, fmt.Sprintf("Expected either 'system' or 'owner' string value for %q, got %v", mk, mv)}
+				}
+				switch vv {
+				case "system", _EMPTY_:
+					acc.nrgAccount = _EMPTY_
+				case "owner":
+					acc.nrgAccount = acc.Name
+				default:
+					return &configErr{tk, fmt.Sprintf("Expected 'system' or 'owner' string value for %q, got %v", mk, mv)}
+				}
 			default:
 				if !tk.IsUsedVariable() {
 					err := &unknownConfigFieldErr{
@@ -2059,7 +2482,7 @@ func parseJetStreamForAccount(v interface{}, acc *Account, errors *[]error, warn
 }
 
 // takes in a storage size as either an int or a string and returns an int64 value based on the input.
-func getStorageSize(v interface{}) (int64, error) {
+func getStorageSize(v any) (int64, error) {
 	_, ok := v.(int64)
 	if ok {
 		return v.(int64), nil
@@ -2093,13 +2516,13 @@ func getStorageSize(v interface{}) (int64, error) {
 }
 
 // Parse enablement of jetstream for a server.
-func parseJetStreamLimits(v interface{}, opts *Options, errors *[]error, warnings *[]error) error {
+func parseJetStreamLimits(v any, opts *Options, errors *[]error) error {
 	var lt token
 	tk, v := unwrapValue(v, &lt)
 
-	lim := JSLimitOpts{}
+	opts.JetStreamLimits = JSLimitOpts{}
 
-	vv, ok := v.(map[string]interface{})
+	vv, ok := v.(map[string]any)
 	if !ok {
 		return &configErr{tk, fmt.Sprintf("Expected a map to define JetStreamLimits, got %T", v)}
 	}
@@ -2107,14 +2530,57 @@ func parseJetStreamLimits(v interface{}, opts *Options, errors *[]error, warning
 		tk, mv = unwrapValue(mv, &lt)
 		switch strings.ToLower(mk) {
 		case "max_ack_pending":
-			lim.MaxAckPending = int(mv.(int64))
+			opts.JetStreamLimits.MaxAckPending = int(mv.(int64))
 		case "max_ha_assets":
-			lim.MaxHAAssets = int(mv.(int64))
+			opts.JetStreamLimits.MaxHAAssets = int(mv.(int64))
 		case "max_request_batch":
-			lim.MaxRequestBatch = int(mv.(int64))
+			opts.JetStreamLimits.MaxRequestBatch = int(mv.(int64))
 		case "duplicate_window":
 			var err error
-			lim.Duplicates, err = time.ParseDuration(mv.(string))
+			opts.JetStreamLimits.Duplicates, err = time.ParseDuration(mv.(string))
+			if err != nil {
+				*errors = append(*errors, err)
+			}
+		case "batch":
+			if err := parseJetStreamLimitsBatch(tk, opts, errors); err != nil {
+				return err
+			}
+		default:
+			if !tk.IsUsedVariable() {
+				err := &unknownConfigFieldErr{
+					field: mk,
+					configErr: configErr{
+						token: tk,
+					},
+				}
+				*errors = append(*errors, err)
+				continue
+			}
+		}
+	}
+	return nil
+}
+
+func parseJetStreamLimitsBatch(v any, opts *Options, errors *[]error) error {
+	var lt token
+	tk, v := unwrapValue(v, &lt)
+
+	vv, ok := v.(map[string]any)
+	if !ok {
+		return &configErr{tk, fmt.Sprintf("Expected a map to define batch limits, got %T", v)}
+	}
+	for mk, mv := range vv {
+		tk, mv = unwrapValue(mv, &lt)
+		switch strings.ToLower(mk) {
+		case "max_inflight_per_stream":
+			opts.JetStreamLimits.MaxBatchInflightPerStream = int(mv.(int64))
+		case "max_inflight_total":
+			opts.JetStreamLimits.MaxBatchInflightTotal = int(mv.(int64))
+		case "max_msgs":
+			opts.JetStreamLimits.MaxBatchSize = int(mv.(int64))
+		case "timeout":
+			var err error
+			opts.JetStreamLimits.MaxBatchTimeout, err = time.ParseDuration(mv.(string))
 			if err != nil {
 				*errors = append(*errors, err)
 			}
@@ -2131,12 +2597,68 @@ func parseJetStreamLimits(v interface{}, opts *Options, errors *[]error, warning
 			}
 		}
 	}
-	opts.JetStreamLimits = lim
+	return nil
+}
+
+// Parse the JetStream TPM options.
+func parseJetStreamTPM(v interface{}, opts *Options, errors *[]error) error {
+	var lt token
+	tk, v := unwrapValue(v, &lt)
+
+	opts.JetStreamTpm = JSTpmOpts{}
+
+	vv, ok := v.(map[string]interface{})
+	if !ok {
+		return &configErr{tk, fmt.Sprintf("Expected a map to define JetStreamLimits, got %T", v)}
+	}
+	for mk, mv := range vv {
+		tk, mv = unwrapValue(mv, &lt)
+		switch strings.ToLower(mk) {
+		case "keys_file":
+			opts.JetStreamTpm.KeysFile = mv.(string)
+		case "encryption_password":
+			opts.JetStreamTpm.KeyPassword = mv.(string)
+		case "srk_password":
+			opts.JetStreamTpm.SrkPassword = mv.(string)
+		case "pcr":
+			opts.JetStreamTpm.Pcr = int(mv.(int64))
+		case "cipher":
+			if err := setJetStreamEkCipher(opts, mv, tk); err != nil {
+				return err
+			}
+		default:
+			if !tk.IsUsedVariable() {
+				err := &unknownConfigFieldErr{
+					field: mk,
+					configErr: configErr{
+						token: tk,
+					},
+				}
+				*errors = append(*errors, err)
+				continue
+			}
+		}
+	}
+	return nil
+}
+
+func setJetStreamEkCipher(opts *Options, mv interface{}, tk token) error {
+	switch strings.ToLower(mv.(string)) {
+	case "chacha", "chachapoly":
+		if fips140.Enabled() {
+			return &configErr{tk, fmt.Sprintf("Cipher type %q cannot be used in FIPS-140 mode", mv)}
+		}
+		opts.JetStreamCipher = ChaCha
+	case "aes":
+		opts.JetStreamCipher = AES
+	default:
+		return &configErr{tk, fmt.Sprintf("Unknown cipher type: %q", mv)}
+	}
 	return nil
 }
 
 // Parse enablement of jetstream for a server.
-func parseJetStream(v interface{}, opts *Options, errors *[]error, warnings *[]error) error {
+func parseJetStream(v any, opts *Options, errors *[]error, warnings *[]error) error {
 	var lt token
 
 	tk, v := unwrapValue(v, &lt)
@@ -2154,11 +2676,17 @@ func parseJetStream(v interface{}, opts *Options, errors *[]error, warnings *[]e
 		default:
 			return &configErr{tk, fmt.Sprintf("Expected 'enabled' or 'disabled' for string value, got '%s'", vv)}
 		}
-	case map[string]interface{}:
+	case map[string]any:
 		doEnable := true
 		for mk, mv := range vv {
 			tk, mv = unwrapValue(mv, &lt)
 			switch strings.ToLower(mk) {
+			case "strict":
+				if v, ok := mv.(bool); ok {
+					opts.NoJetStreamStrict = !v
+				} else {
+					return &configErr{tk, fmt.Sprintf("Expected 'true' or 'false' for bool value, got '%s'", mv)}
+				}
 			case "store", "store_dir", "storedir":
 				// StoreDir can be set at the top level as well so have to prevent ambiguous declarations.
 				if opts.StoreDir != _EMPTY_ {
@@ -2196,18 +2724,17 @@ func parseJetStream(v interface{}, opts *Options, errors *[]error, warnings *[]e
 			case "prev_key", "prev_ek", "prev_encryption_key":
 				opts.JetStreamOldKey = mv.(string)
 			case "cipher":
-				switch strings.ToLower(mv.(string)) {
-				case "chacha", "chachapoly":
-					opts.JetStreamCipher = ChaCha
-				case "aes":
-					opts.JetStreamCipher = AES
-				default:
-					return &configErr{tk, fmt.Sprintf("Unknown cipher type: %q", mv)}
+				if err := setJetStreamEkCipher(opts, mv, tk); err != nil {
+					return err
 				}
 			case "extension_hint":
 				opts.JetStreamExtHint = mv.(string)
 			case "limits":
-				if err := parseJetStreamLimits(tk, opts, errors, warnings); err != nil {
+				if err := parseJetStreamLimits(tk, opts, errors); err != nil {
+					return err
+				}
+			case "tpm":
+				if err := parseJetStreamTPM(tk, opts, errors); err != nil {
 					return err
 				}
 			case "unique_tag":
@@ -2218,6 +2745,53 @@ func parseJetStream(v interface{}, opts *Options, errors *[]error, warnings *[]e
 					return &configErr{tk, fmt.Sprintf("%s %s", strings.ToLower(mk), err)}
 				}
 				opts.JetStreamMaxCatchup = s
+			case "max_buffered_size":
+				s, err := getStorageSize(mv)
+				if err != nil {
+					return &configErr{tk, fmt.Sprintf("%s %s", strings.ToLower(mk), err)}
+				}
+				opts.StreamMaxBufferedSize = s
+			case "max_buffered_msgs":
+				mlen, ok := mv.(int64)
+				if !ok {
+					return &configErr{tk, fmt.Sprintf("Expected a parseable size for %q, got %v", mk, mv)}
+				}
+				opts.StreamMaxBufferedMsgs = int(mlen)
+			case "request_queue_limit":
+				lim, ok := mv.(int64)
+				if !ok {
+					return &configErr{tk, fmt.Sprintf("Expected a parseable size for %q, got %v", mk, mv)}
+				}
+				opts.JetStreamRequestQueueLimit = lim
+			case "info_queue_limit":
+				lim, ok := mv.(int64)
+				if !ok {
+					return &configErr{tk, fmt.Sprintf("Expected a parseable size for %q, got %v", mk, mv)}
+				}
+				opts.JetStreamInfoQueueLimit = lim
+			case "meta_compact":
+				thres, ok := mv.(int64)
+				if !ok || thres < 0 {
+					return &configErr{tk, fmt.Sprintf("Expected an absolute size for %q, got %v", mk, mv)}
+				}
+				opts.JetStreamMetaCompact = uint64(thres)
+			case "meta_compact_size":
+				s, err := getStorageSize(mv)
+				if err != nil {
+					return &configErr{tk, fmt.Sprintf("%s %s", strings.ToLower(mk), err)}
+				}
+				if s < 0 {
+					return &configErr{tk, fmt.Sprintf("Expected an absolute size for %q, got %v", mk, mv)}
+				}
+				opts.JetStreamMetaCompactSize = uint64(s)
+			case "meta_compact_sync":
+				opts.JetStreamMetaCompactSync = mv.(bool)
+			case "max_concurrent_io":
+				dios, ok := mv.(int64)
+				if !ok || dios < minConcurrentIOs || dios > maxConcurrentIOs {
+					return &configErr{tk, fmt.Sprintf("Expected an absolute size for %q between 4 and 8192, got %v", mk, mv)}
+				}
+				opts.JetStreamConcurrentIOs = int(dios)
 			default:
 				if !tk.IsUsedVariable() {
 					err := &unknownConfigFieldErr{
@@ -2240,12 +2814,12 @@ func parseJetStream(v interface{}, opts *Options, errors *[]error, warnings *[]e
 }
 
 // parseLeafNodes will parse the leaf node config.
-func parseLeafNodes(v interface{}, opts *Options, errors *[]error, warnings *[]error) error {
+func parseLeafNodes(v any, opts *Options, errors *[]error, warnings *[]error) error {
 	var lt token
 	defer convertPanicToErrorList(&lt, errors)
 
 	tk, v := unwrapValue(v, &lt)
-	cm, ok := v.(map[string]interface{})
+	cm, ok := v.(map[string]any)
 	if !ok {
 		return &configErr{tk, fmt.Sprintf("Expected map to define a leafnode, got %T", v)}
 	}
@@ -2275,6 +2849,7 @@ func parseLeafNodes(v interface{}, opts *Options, errors *[]error, warnings *[]e
 			}
 			opts.LeafNode.Username = auth.user
 			opts.LeafNode.Password = auth.pass
+			opts.LeafNode.ProxyRequired = auth.proxyRequired
 			opts.LeafNode.AuthTimeout = auth.timeout
 			opts.LeafNode.Account = auth.acc
 			opts.LeafNode.Users = auth.users
@@ -2294,6 +2869,8 @@ func parseLeafNodes(v interface{}, opts *Options, errors *[]error, warnings *[]e
 			opts.LeafNode.Remotes = remotes
 		case "reconnect", "reconnect_delay", "reconnect_interval":
 			opts.LeafNode.ReconnectInterval = parseDuration("reconnect", tk, mv, errors, warnings)
+		case "dial_timeout":
+			opts.LeafNode.DialTimeout = parseDuration("dial_timeout", tk, mv, errors, warnings)
 		case "tls":
 			tc, err := parseTLS(tk, true)
 			if err != nil {
@@ -2309,12 +2886,13 @@ func parseLeafNodes(v interface{}, opts *Options, errors *[]error, warnings *[]e
 			opts.LeafNode.TLSMap = tc.Map
 			opts.LeafNode.TLSPinnedCerts = tc.PinnedCerts
 			opts.LeafNode.TLSHandshakeFirst = tc.HandshakeFirst
+			opts.LeafNode.TLSHandshakeFirstFallback = tc.FallbackDelay
 			opts.LeafNode.tlsConfigOpts = tc
 		case "leafnode_advertise", "advertise":
 			opts.LeafNode.Advertise = mv.(string)
 		case "no_advertise":
 			opts.LeafNode.NoAdvertise = mv.(bool)
-			trackExplicitVal(opts, &opts.inConfig, "LeafNode.NoAdvertise", opts.LeafNode.NoAdvertise)
+			trackExplicitVal(&opts.inConfig, "LeafNode.NoAdvertise", opts.LeafNode.NoAdvertise)
 		case "min_version", "minimum_version":
 			version := mv.(string)
 			if err := checkLeafMinVersionConfig(version); err != nil {
@@ -2328,6 +2906,12 @@ func parseLeafNodes(v interface{}, opts *Options, errors *[]error, warnings *[]e
 				*errors = append(*errors, err)
 				continue
 			}
+		case "isolate_leafnode_interest", "isolate":
+			opts.LeafNode.IsolateLeafnodeInterest = mv.(bool)
+		case "write_deadline":
+			opts.LeafNode.WriteDeadline = parseDuration("write_deadline", tk, mv, errors, warnings)
+		case "write_timeout":
+			opts.LeafNode.WriteTimeout = parseWriteDeadlinePolicy(tk, mv.(string), errors)
 		default:
 			if !tk.IsUsedVariable() {
 				err := &unknownConfigFieldErr{
@@ -2346,9 +2930,9 @@ func parseLeafNodes(v interface{}, opts *Options, errors *[]error, warnings *[]e
 
 // This is the authorization parser adapter for the leafnode's
 // authorization config.
-func parseLeafAuthorization(v interface{}, errors *[]error, warnings *[]error) (*authorization, error) {
+func parseLeafAuthorization(v any, errors, warnings *[]error) (*authorization, error) {
 	var (
-		am   map[string]interface{}
+		am   map[string]any
 		tk   token
 		lt   token
 		auth = &authorization{}
@@ -2356,7 +2940,7 @@ func parseLeafAuthorization(v interface{}, errors *[]error, warnings *[]error) (
 	defer convertPanicToErrorList(&lt, errors)
 
 	_, v = unwrapValue(v, &lt)
-	am = v.(map[string]interface{})
+	am = v.(map[string]any)
 	for mk, mv := range am {
 		tk, mv = unwrapValue(mv, &lt)
 		switch strings.ToLower(mk) {
@@ -2371,16 +2955,28 @@ func parseLeafAuthorization(v interface{}, errors *[]error, warnings *[]error) (
 			}
 			auth.nkey = nk
 		case "timeout":
-			at := float64(1)
+			at := float64(0)
 			switch mv := mv.(type) {
 			case int64:
 				at = float64(mv)
 			case float64:
 				at = mv
+			case string:
+				d, err := time.ParseDuration(mv)
+				if err != nil {
+					return nil, &configErr{tk, fmt.Sprintf("error parsing leafnode authorization config, 'timeout' %s", err)}
+				}
+				at = d.Seconds()
+			default:
+				return nil, &configErr{tk, "error parsing leafnode authorization config, 'timeout' wrong type"}
+			}
+			if at > (60 * time.Second).Seconds() {
+				reason := fmt.Sprintf("timeout of %v (%f seconds) is high, consider keeping it under 60 seconds. possibly caused by unquoted duration; use '1m' instead of 1m, for example", mv, at)
+				*warnings = append(*warnings, &configWarningErr{field: mk, configErr: configErr{token: tk, reason: reason}})
 			}
 			auth.timeout = at
 		case "users":
-			users, err := parseLeafUsers(tk, errors, warnings)
+			users, err := parseLeafUsers(tk, errors)
 			if err != nil {
 				*errors = append(*errors, err)
 				continue
@@ -2388,6 +2984,8 @@ func parseLeafAuthorization(v interface{}, errors *[]error, warnings *[]error) (
 			auth.users = users
 		case "account":
 			auth.acc = mv.(string)
+		case "proxy_required":
+			auth.proxyRequired = mv.(bool)
 		default:
 			if !tk.IsUsedVariable() {
 				err := &unknownConfigFieldErr{
@@ -2407,7 +3005,7 @@ func parseLeafAuthorization(v interface{}, errors *[]error, warnings *[]error) (
 // This is a trimmed down version of parseUsers that is adapted
 // for the users possibly defined in the authorization{} section
 // of leafnodes {}.
-func parseLeafUsers(mv interface{}, errors *[]error, warnings *[]error) ([]*User, error) {
+func parseLeafUsers(mv any, errors *[]error) ([]*User, error) {
 	var (
 		tk    token
 		lt    token
@@ -2417,14 +3015,14 @@ func parseLeafUsers(mv interface{}, errors *[]error, warnings *[]error) ([]*User
 
 	tk, mv = unwrapValue(mv, &lt)
 	// Make sure we have an array
-	uv, ok := mv.([]interface{})
+	uv, ok := mv.([]any)
 	if !ok {
 		return nil, &configErr{tk, fmt.Sprintf("Expected users field to be an array, got %v", mv)}
 	}
 	for _, u := range uv {
 		tk, u = unwrapValue(u, &lt)
 		// Check its a map/struct
-		um, ok := u.(map[string]interface{})
+		um, ok := u.(map[string]any)
 		if !ok {
 			err := &configErr{tk, fmt.Sprintf("Expected user entry to be a map/struct, got %v", u)}
 			*errors = append(*errors, err)
@@ -2446,6 +3044,8 @@ func parseLeafUsers(mv interface{}, errors *[]error, warnings *[]error) ([]*User
 				// we need to create internal objects to store u/p and account
 				// name and have a server structure to hold that.
 				user.Account = NewAccount(v.(string))
+			case "proxy_required":
+				user.ProxyRequired = v.(bool)
 			default:
 				if !tk.IsUsedVariable() {
 					err := &unknownConfigFieldErr{
@@ -2464,24 +3064,26 @@ func parseLeafUsers(mv interface{}, errors *[]error, warnings *[]error) ([]*User
 	return users, nil
 }
 
-func parseRemoteLeafNodes(v interface{}, errors *[]error, warnings *[]error) ([]*RemoteLeafOpts, error) {
+func parseRemoteLeafNodes(v any, errors *[]error, warnings *[]error) ([]*RemoteLeafOpts, error) {
 	var lt token
 	defer convertPanicToErrorList(&lt, errors)
 	tk, v := unwrapValue(v, &lt)
-	ra, ok := v.([]interface{})
+	ra, ok := v.([]any)
 	if !ok {
 		return nil, &configErr{tk, fmt.Sprintf("Expected remotes field to be an array, got %T", v)}
 	}
+	names := make(map[string]struct{})
 	remotes := make([]*RemoteLeafOpts, 0, len(ra))
 	for _, r := range ra {
 		tk, r = unwrapValue(r, &lt)
 		// Check its a map/struct
-		rm, ok := r.(map[string]interface{})
+		rm, ok := r.(map[string]any)
 		if !ok {
 			*errors = append(*errors, &configErr{tk, fmt.Sprintf("Expected remote leafnode entry to be a map/struct, got %v", r)})
 			continue
 		}
 		remote := &RemoteLeafOpts{}
+		var proxyToken token
 		for k, v := range rm {
 			tk, v = unwrapValue(v, &lt)
 			switch strings.ToLower(k) {
@@ -2489,8 +3091,8 @@ func parseRemoteLeafNodes(v interface{}, errors *[]error, warnings *[]error) ([]
 				remote.NoRandomize = v.(bool)
 			case "url", "urls":
 				switch v := v.(type) {
-				case []interface{}, []string:
-					urls, errs := parseURLs(v.([]interface{}), "leafnode", warnings)
+				case []any, []string:
+					urls, errs := parseURLs(v.([]any), "leafnode", warnings)
 					if errs != nil {
 						*errors = append(*errors, errs...)
 						continue
@@ -2557,14 +3159,14 @@ func parseRemoteLeafNodes(v interface{}, errors *[]error, warnings *[]error) ([]
 			case "hub":
 				remote.Hub = v.(bool)
 			case "deny_imports", "deny_import":
-				subjects, err := parsePermSubjects(tk, errors, warnings)
+				subjects, err := parsePermSubjects(tk, errors, false)
 				if err != nil {
 					*errors = append(*errors, err)
 					continue
 				}
 				remote.DenyImports = subjects
 			case "deny_exports", "deny_export":
-				subjects, err := parsePermSubjects(tk, errors, warnings)
+				subjects, err := parsePermSubjects(tk, errors, false)
 				if err != nil {
 					*errors = append(*errors, err)
 					continue
@@ -2575,12 +3177,75 @@ func parseRemoteLeafNodes(v interface{}, errors *[]error, warnings *[]error) ([]
 			case "ws_no_masking", "websocket_no_masking":
 				remote.Websocket.NoMasking = v.(bool)
 			case "jetstream_cluster_migrate", "js_cluster_migrate":
-				remote.JetStreamClusterMigrate = true
+				var lt token
+
+				tk, v := unwrapValue(v, &lt)
+				switch vv := v.(type) {
+				case bool:
+					remote.JetStreamClusterMigrate = vv
+				case map[string]any:
+					remote.JetStreamClusterMigrate = true
+					migrateConfig, ok := v.(map[string]any)
+					if !ok {
+						continue
+					}
+					val, ok := migrateConfig["leader_migrate_delay"]
+					tk, delay := unwrapValue(val, &tk)
+					if ok {
+						remote.JetStreamClusterMigrateDelay = parseDuration("leader_migrate_delay", tk, delay, errors, warnings)
+					}
+				default:
+					*errors = append(*errors, &configErr{tk, fmt.Sprintf("Expected boolean or map for jetstream_cluster_migrate, got %T", v)})
+				}
+			case "isolate_leafnode_interest", "isolate":
+				remote.LocalIsolation = v.(bool)
+			case "request_isolation":
+				remote.RequestIsolation = v.(bool)
 			case "compression":
 				if err := parseCompression(&remote.Compression, CompressionS2Auto, tk, k, v); err != nil {
 					*errors = append(*errors, err)
 					continue
 				}
+			case "first_info_timeout":
+				remote.FirstInfoTimeout = parseDuration(k, tk, v, errors, warnings)
+			case "dial_timeout":
+				remote.DialTimeout = parseDuration(k, tk, v, errors, warnings)
+			case "disabled":
+				remote.Disabled = v.(bool)
+			case "proxy":
+				proxyMap, ok := v.(map[string]any)
+				if !ok {
+					*errors = append(*errors, &configErr{tk, fmt.Sprintf("Expected proxy to be a map, got %T", v)})
+					continue
+				}
+				// Capture the token for the "proxy" field itself, before the map iteration
+				proxyToken = tk
+				for pk, pv := range proxyMap {
+					tk, pv = unwrapValue(pv, &lt)
+					switch strings.ToLower(pk) {
+					case "url":
+						remote.Proxy.URL = pv.(string)
+					case "username":
+						remote.Proxy.Username = pv.(string)
+					case "password":
+						remote.Proxy.Password = pv.(string)
+					case "timeout":
+						remote.Proxy.Timeout = parseDuration("proxy timeout", tk, pv, errors, warnings)
+					default:
+						if !tk.IsUsedVariable() {
+							err := &unknownConfigFieldErr{
+								field: pk,
+								configErr: configErr{
+									token: tk,
+								},
+							}
+							*errors = append(*errors, err)
+							continue
+						}
+					}
+				}
+			case "ignore_discovered_servers":
+				remote.IgnoreDiscoveredServers = v.(bool)
 			default:
 				if !tk.IsUsedVariable() {
 					err := &unknownConfigFieldErr{
@@ -2594,6 +3259,22 @@ func parseRemoteLeafNodes(v interface{}, errors *[]error, warnings *[]error) ([]
 				}
 			}
 		}
+		// Use the saved proxy token for validation errors, not the last field token
+		if warns, err := validateLeafNodeProxyOptions(remote); err != nil {
+			*errors = append(*errors, &configErr{proxyToken, err.Error()})
+			continue
+		} else {
+			// Add any warnings about proxy configuration
+			for _, warn := range warns {
+				*warnings = append(*warnings, &configErr{proxyToken, warn})
+			}
+		}
+		rn := remote.name()
+		if _, dup := names[rn]; dup {
+			*errors = append(*errors, &configErr{tk, fmt.Sprintf("duplicate remote %s", remote.safeName())})
+			continue
+		}
+		names[rn] = struct{}{}
 		remotes = append(remotes, remote)
 	}
 	return remotes, nil
@@ -2619,13 +3300,13 @@ func getTLSConfig(tk token) (*tls.Config, *TLSConfigOpts, error) {
 	return config, tc, nil
 }
 
-func parseGateways(v interface{}, errors *[]error, warnings *[]error) ([]*RemoteGatewayOpts, error) {
+func parseGateways(v any, errors *[]error, warnings *[]error) ([]*RemoteGatewayOpts, error) {
 	var lt token
 	defer convertPanicToErrorList(&lt, errors)
 
 	tk, v := unwrapValue(v, &lt)
 	// Make sure we have an array
-	ga, ok := v.([]interface{})
+	ga, ok := v.([]any)
 	if !ok {
 		return nil, &configErr{tk, fmt.Sprintf("Expected gateways field to be an array, got %T", v)}
 	}
@@ -2633,7 +3314,7 @@ func parseGateways(v interface{}, errors *[]error, warnings *[]error) ([]*Remote
 	for _, g := range ga {
 		tk, g = unwrapValue(g, &lt)
 		// Check its a map/struct
-		gm, ok := g.(map[string]interface{})
+		gm, ok := g.(map[string]any)
 		if !ok {
 			*errors = append(*errors, &configErr{tk, fmt.Sprintf("Expected gateway entry to be a map/struct, got %v", g)})
 			continue
@@ -2661,7 +3342,7 @@ func parseGateways(v interface{}, errors *[]error, warnings *[]error) ([]*Remote
 				}
 				gateway.URLs = append(gateway.URLs, url)
 			case "urls":
-				urls, errs := parseURLs(v.([]interface{}), "gateway", warnings)
+				urls, errs := parseURLs(v.([]any), "gateway", warnings)
 				if errs != nil {
 					*errors = append(*errors, errs...)
 					continue
@@ -2699,6 +3380,29 @@ func setClusterPermissions(opts *ClusterOpts, perms *Permissions) {
 	}
 }
 
+func checkClusterPermissionSubjects(perms *Permissions) error {
+	if perms == nil {
+		return nil
+	}
+	if perms.Publish != nil {
+		if err := checkPermSubjectArray(perms.Publish.Allow, false); err != nil {
+			return fmt.Errorf("cluster import allow: %w", err)
+		}
+		if err := checkPermSubjectArray(perms.Publish.Deny, false); err != nil {
+			return fmt.Errorf("cluster import deny: %w", err)
+		}
+	}
+	if perms.Subscribe != nil {
+		if err := checkPermSubjectArray(perms.Subscribe.Allow, false); err != nil {
+			return fmt.Errorf("cluster export allow: %w", err)
+		}
+		if err := checkPermSubjectArray(perms.Subscribe.Deny, false); err != nil {
+			return fmt.Errorf("cluster export deny: %w", err)
+		}
+	}
+	return nil
+}
+
 // Temp structures to hold account import and export defintions since they need
 // to be processed after being parsed.
 type export struct {
@@ -2709,14 +3413,16 @@ type export struct {
 	lat  *serviceLatency
 	rthr time.Duration
 	tPos uint
+	atrc bool // allow_trace
 }
 
 type importStream struct {
-	acc *Account
-	an  string
-	sub string
-	to  string
-	pre string
+	acc  *Account
+	an   string
+	sub  string
+	to   string
+	pre  string
+	atrc bool // allow_trace
 }
 
 type importService struct {
@@ -2732,9 +3438,9 @@ func isReservedAccount(name string) bool {
 	return name == globalAccountName
 }
 
-func parseAccountMapDest(v interface{}, tk token, errors *[]error, warnings *[]error) (*MapDest, *configErr) {
+func parseAccountMapDest(v any, tk token, errors *[]error) (*MapDest, *configErr) {
 	// These should be maps.
-	mv, ok := v.(map[string]interface{})
+	mv, ok := v.(map[string]any)
 	if !ok {
 		err := &configErr{tk, "Expected an entry for the mapping destination"}
 		*errors = append(*errors, err)
@@ -2801,12 +3507,12 @@ func parseAccountMapDest(v interface{}, tk token, errors *[]error, warnings *[]e
 }
 
 // parseAccountMappings is called to parse account mappings.
-func parseAccountMappings(v interface{}, acc *Account, errors *[]error, warnings *[]error) error {
+func parseAccountMappings(v any, acc *Account, errors *[]error) error {
 	var lt token
 	defer convertPanicToErrorList(&lt, errors)
 
 	tk, v := unwrapValue(v, &lt)
-	am := v.(map[string]interface{})
+	am := v.(map[string]any)
 	for subj, mv := range am {
 		if !IsValidSubject(subj) {
 			err := &configErr{tk, fmt.Sprintf("Subject %q is not a valid subject", subj)}
@@ -2822,11 +3528,11 @@ func parseAccountMappings(v interface{}, acc *Account, errors *[]error, warnings
 				*errors = append(*errors, err)
 				continue
 			}
-		case []interface{}:
+		case []any:
 			var mappings []*MapDest
-			for _, mv := range v.([]interface{}) {
+			for _, mv := range v.([]any) {
 				tk, amv := unwrapValue(mv, &lt)
-				mdest, err := parseAccountMapDest(amv, tk, errors, warnings)
+				mdest, err := parseAccountMapDest(amv, tk, errors)
 				if err != nil {
 					continue
 				}
@@ -2839,9 +3545,9 @@ func parseAccountMappings(v interface{}, acc *Account, errors *[]error, warnings
 				*errors = append(*errors, err)
 				continue
 			}
-		case interface{}:
+		case any:
 			tk, amv := unwrapValue(mv, &lt)
-			mdest, err := parseAccountMapDest(amv, tk, errors, warnings)
+			mdest, err := parseAccountMapDest(amv, tk, errors)
 			if err != nil {
 				continue
 			}
@@ -2862,12 +3568,12 @@ func parseAccountMappings(v interface{}, acc *Account, errors *[]error, warnings
 }
 
 // parseAccountLimits is called to parse account limits in a server config.
-func parseAccountLimits(mv interface{}, acc *Account, errors *[]error, warnings *[]error) error {
+func parseAccountLimits(mv any, acc *Account, errors *[]error) error {
 	var lt token
 	defer convertPanicToErrorList(&lt, errors)
 
 	tk, v := unwrapValue(mv, &lt)
-	am, ok := v.(map[string]interface{})
+	am, ok := v.(map[string]any)
 	if !ok {
 		return &configErr{tk, fmt.Sprintf("Expected account limits to be a map/struct, got %+v", v)}
 	}
@@ -2894,8 +3600,71 @@ func parseAccountLimits(mv interface{}, acc *Account, errors *[]error, warnings 
 	return nil
 }
 
+func parseAccountMsgTrace(mv any, topKey string, acc *Account) error {
+	processDest := func(tk token, k string, v any) error {
+		td, ok := v.(string)
+		if !ok {
+			return &configErr{tk, fmt.Sprintf("Field %q should be a string, got %T", k, v)}
+		}
+		if !IsValidPublishSubject(td) {
+			return &configErr{tk, fmt.Sprintf("Trace destination %q is not valid", td)}
+		}
+		acc.traceDest = td
+		return nil
+	}
+	processSampling := func(tk token, n int) error {
+		if n <= 0 || n > 100 {
+			return &configErr{tk, fmt.Sprintf("Ttrace destination sampling value %d is invalid, needs to be [1..100]", n)}
+		}
+		acc.traceDestSampling = n
+		return nil
+	}
+
+	var lt token
+	tk, v := unwrapValue(mv, &lt)
+	switch vv := v.(type) {
+	case string:
+		return processDest(tk, topKey, v)
+	case map[string]any:
+		for k, v := range vv {
+			tk, v := unwrapValue(v, &lt)
+			switch strings.ToLower(k) {
+			case "dest":
+				if err := processDest(tk, k, v); err != nil {
+					return err
+				}
+			case "sampling":
+				switch vv := v.(type) {
+				case int64:
+					if err := processSampling(tk, int(vv)); err != nil {
+						return err
+					}
+				case string:
+					s := strings.TrimSuffix(vv, "%")
+					n, err := strconv.Atoi(s)
+					if err != nil {
+						return &configErr{tk, fmt.Sprintf("Invalid trace destination sampling value %q", vv)}
+					}
+					if err := processSampling(tk, n); err != nil {
+						return err
+					}
+				default:
+					return &configErr{tk, fmt.Sprintf("Trace destination sampling field %q should be an integer or a percentage, got %T", k, v)}
+				}
+			default:
+				if !tk.IsUsedVariable() {
+					return &configErr{tk, fmt.Sprintf("Unknown field %q parsing account message trace map/struct %q", k, topKey)}
+				}
+			}
+		}
+	default:
+		return &configErr{tk, fmt.Sprintf("Expected account message trace %q to be a string or a map/struct, got %T", topKey, v)}
+	}
+	return nil
+}
+
 // parseAccounts will parse the different accounts syntax.
-func parseAccounts(v interface{}, opts *Options, errors *[]error, warnings *[]error) error {
+func parseAccounts(v any, opts *Options, errors *[]error, warnings *[]error) error {
 	var (
 		importStreams  []*importStream
 		importServices []*importService
@@ -2908,9 +3677,9 @@ func parseAccounts(v interface{}, opts *Options, errors *[]error, warnings *[]er
 	tk, v := unwrapValue(v, &lt)
 	switch vv := v.(type) {
 	// Simple array of account names.
-	case []interface{}, []string:
-		m := make(map[string]struct{}, len(v.([]interface{})))
-		for _, n := range v.([]interface{}) {
+	case []any, []string:
+		m := make(map[string]struct{}, len(v.([]any)))
+		for _, n := range v.([]any) {
 			tk, name := unwrapValue(n, &lt)
 			ns := name.(string)
 			// Check for reserved names.
@@ -2928,7 +3697,7 @@ func parseAccounts(v interface{}, opts *Options, errors *[]error, warnings *[]er
 			m[ns] = struct{}{}
 		}
 	// More common map entry
-	case map[string]interface{}:
+	case map[string]any:
 		// Track users across accounts, must be unique across
 		// accounts and nkeys vs users.
 		// We also want to check for users that may have been added in
@@ -2944,7 +3713,7 @@ func parseAccounts(v interface{}, opts *Options, errors *[]error, warnings *[]er
 			}
 
 			// These should be maps.
-			mv, ok := amv.(map[string]interface{})
+			mv, ok := amv.(map[string]any)
 			if !ok {
 				err := &configErr{tk, "Expected map entries for accounts"}
 				*errors = append(*errors, err)
@@ -2975,7 +3744,7 @@ func parseAccounts(v interface{}, opts *Options, errors *[]error, warnings *[]er
 					}
 					acc.Nkey = nk
 				case "imports":
-					streams, services, err := parseAccountImports(tk, acc, errors, warnings)
+					streams, services, err := parseAccountImports(tk, acc, errors)
 					if err != nil {
 						*errors = append(*errors, err)
 						continue
@@ -2983,7 +3752,7 @@ func parseAccounts(v interface{}, opts *Options, errors *[]error, warnings *[]er
 					importStreams = append(importStreams, streams...)
 					importServices = append(importServices, services...)
 				case "exports":
-					streams, services, err := parseAccountExports(tk, acc, errors, warnings)
+					streams, services, err := parseAccountExports(tk, acc, errors)
 					if err != nil {
 						*errors = append(*errors, err)
 						continue
@@ -2991,7 +3760,7 @@ func parseAccounts(v interface{}, opts *Options, errors *[]error, warnings *[]er
 					exportStreams = append(exportStreams, streams...)
 					exportServices = append(exportServices, services...)
 				case "jetstream":
-					err := parseJetStreamForAccount(mv, acc, errors, warnings)
+					err := parseJetStreamForAccount(mv, acc, errors)
 					if err != nil {
 						*errors = append(*errors, err)
 						continue
@@ -2999,29 +3768,46 @@ func parseAccounts(v interface{}, opts *Options, errors *[]error, warnings *[]er
 				case "users":
 					var err error
 					usersTk = tk
-					nkeyUsr, users, err = parseUsers(mv, opts, errors, warnings)
+					nkeyUsr, users, err = parseUsers(mv, errors)
 					if err != nil {
 						*errors = append(*errors, err)
 						continue
 					}
 				case "default_permissions":
-					permissions, err := parseUserPermissions(tk, errors, warnings)
+					permissions, err := parseUserPermissions(tk, errors)
 					if err != nil {
 						*errors = append(*errors, err)
 						continue
 					}
 					acc.defaultPerms = permissions
 				case "mappings", "maps":
-					err := parseAccountMappings(tk, acc, errors, warnings)
+					err := parseAccountMappings(tk, acc, errors)
 					if err != nil {
 						*errors = append(*errors, err)
 						continue
 					}
 				case "limits":
-					err := parseAccountLimits(tk, acc, errors, warnings)
+					err := parseAccountLimits(tk, acc, errors)
 					if err != nil {
 						*errors = append(*errors, err)
 						continue
+					}
+				case "msg_trace", "trace_dest":
+					if err := parseAccountMsgTrace(tk, k, acc); err != nil {
+						*errors = append(*errors, err)
+						continue
+					}
+					// If trace destination is set but no sampling, set it to 100%.
+					if acc.traceDest != _EMPTY_ && acc.traceDestSampling == 0 {
+						acc.traceDestSampling = 100
+					} else if acc.traceDestSampling > 0 && acc.traceDest == _EMPTY_ {
+						// If no trace destination is provided, no trace would be
+						// triggered, so if the user set a sampling value expecting
+						// something to happen, want and set the value to 0 for good
+						// measure.
+						*warnings = append(*warnings,
+							&configErr{tk, "Trace destination sampling ignored since no destination was set"})
+						acc.traceDestSampling = 0
 					}
 				default:
 					if !tk.IsUsedVariable() {
@@ -3147,6 +3933,14 @@ func parseAccounts(v interface{}, opts *Options, errors *[]error, warnings *[]er
 				continue
 			}
 		}
+
+		if service.atrc {
+			if err := service.acc.SetServiceExportAllowTrace(service.sub, true); err != nil {
+				msg := fmt.Sprintf("Error adding allow_trace for %q: %v", service.sub, err)
+				*errors = append(*errors, &configErr{tk, msg})
+				continue
+			}
+		}
 	}
 	for _, stream := range importStreams {
 		ta := am[stream.an]
@@ -3156,13 +3950,13 @@ func parseAccounts(v interface{}, opts *Options, errors *[]error, warnings *[]er
 			continue
 		}
 		if stream.pre != _EMPTY_ {
-			if err := stream.acc.AddStreamImport(ta, stream.sub, stream.pre); err != nil {
+			if err := stream.acc.addStreamImportWithClaim(ta, stream.sub, stream.pre, stream.atrc, nil); err != nil {
 				msg := fmt.Sprintf("Error adding stream import %q: %v", stream.sub, err)
 				*errors = append(*errors, &configErr{tk, msg})
 				continue
 			}
 		} else {
-			if err := stream.acc.AddMappedStreamImport(ta, stream.sub, stream.to); err != nil {
+			if err := stream.acc.addMappedStreamImportWithClaim(ta, stream.sub, stream.to, stream.atrc, nil); err != nil {
 				msg := fmt.Sprintf("Error adding stream import %q: %v", stream.sub, err)
 				*errors = append(*errors, &configErr{tk, msg})
 				continue
@@ -3195,13 +3989,13 @@ func parseAccounts(v interface{}, opts *Options, errors *[]error, warnings *[]er
 }
 
 // Parse the account exports
-func parseAccountExports(v interface{}, acc *Account, errors, warnings *[]error) ([]*export, []*export, error) {
+func parseAccountExports(v any, acc *Account, errors *[]error) ([]*export, []*export, error) {
 	var lt token
 	defer convertPanicToErrorList(&lt, errors)
 
 	// This should be an array of objects/maps.
 	tk, v := unwrapValue(v, &lt)
-	ims, ok := v.([]interface{})
+	ims, ok := v.([]any)
 	if !ok {
 		return nil, nil, &configErr{tk, fmt.Sprintf("Exports should be an array, got %T", v)}
 	}
@@ -3211,7 +4005,7 @@ func parseAccountExports(v interface{}, acc *Account, errors, warnings *[]error)
 
 	for _, v := range ims {
 		// Should have stream or service
-		stream, service, err := parseExportStreamOrService(v, errors, warnings)
+		stream, service, err := parseExportStreamOrService(v, errors)
 		if err != nil {
 			*errors = append(*errors, err)
 			continue
@@ -3229,39 +4023,44 @@ func parseAccountExports(v interface{}, acc *Account, errors, warnings *[]error)
 }
 
 // Parse the account imports
-func parseAccountImports(v interface{}, acc *Account, errors, warnings *[]error) ([]*importStream, []*importService, error) {
+func parseAccountImports(v any, acc *Account, errors *[]error) ([]*importStream, []*importService, error) {
 	var lt token
 	defer convertPanicToErrorList(&lt, errors)
 
 	// This should be an array of objects/maps.
 	tk, v := unwrapValue(v, &lt)
-	ims, ok := v.([]interface{})
+	ims, ok := v.([]any)
 	if !ok {
 		return nil, nil, &configErr{tk, fmt.Sprintf("Imports should be an array, got %T", v)}
 	}
 
 	var services []*importService
 	var streams []*importStream
-	svcSubjects := map[string]*importService{}
+	svcSubjects := map[string][]*importService{}
 
+IMS_LOOP:
 	for _, v := range ims {
 		// Should have stream or service
-		stream, service, err := parseImportStreamOrService(v, errors, warnings)
+		stream, service, err := parseImportStreamOrService(v, errors)
 		if err != nil {
 			*errors = append(*errors, err)
 			continue
 		}
 		if service != nil {
-			if dup := svcSubjects[service.to]; dup != nil {
-				tk, _ := unwrapValue(v, &lt)
-				err := &configErr{tk,
-					fmt.Sprintf("Duplicate service import subject %q, previously used in import for account %q, subject %q",
-						service.to, dup.an, dup.sub)}
-				*errors = append(*errors, err)
-				continue
+			sisPerSubj := svcSubjects[service.to]
+			for _, dup := range sisPerSubj {
+				if dup.an == service.an {
+					tk, _ := unwrapValue(v, &lt)
+					err := &configErr{tk,
+						fmt.Sprintf("Duplicate service import subject %q, previously used in import for account %q, subject %q",
+							service.to, dup.an, dup.sub)}
+					*errors = append(*errors, err)
+					continue IMS_LOOP
+				}
 			}
-			svcSubjects[service.to] = service
 			service.acc = acc
+			sisPerSubj = append(sisPerSubj, service)
+			svcSubjects[service.to] = sisPerSubj
 			services = append(services, service)
 		}
 		if stream != nil {
@@ -3273,7 +4072,7 @@ func parseAccountImports(v interface{}, acc *Account, errors, warnings *[]error)
 }
 
 // Helper to parse an embedded account description for imported services or streams.
-func parseAccount(v map[string]interface{}, errors, warnings *[]error) (string, string, error) {
+func parseAccount(v map[string]any, errors *[]error) (string, string, error) {
 	var lt token
 	defer convertPanicToErrorList(&lt, errors)
 
@@ -3306,7 +4105,7 @@ func parseAccount(v map[string]interface{}, errors, warnings *[]error) (string, 
 // {stream: "synadia.private.>", accounts: [cncf, natsio]}
 // {service: "pub.request"} # No accounts means public.
 // {service: "pub.special.request", accounts: [nats.io]}
-func parseExportStreamOrService(v interface{}, errors, warnings *[]error) (*export, *export, error) {
+func parseExportStreamOrService(v any, errors *[]error) (*export, *export, error) {
 	var (
 		curStream  *export
 		curService *export
@@ -3320,11 +4119,14 @@ func parseExportStreamOrService(v interface{}, errors, warnings *[]error) (*expo
 		latToken   token
 		lt         token
 		accTokPos  uint
+		atrc       bool
+		atrcSeen   bool
+		atrcToken  token
 	)
 	defer convertPanicToErrorList(&lt, errors)
 
 	tk, v := unwrapValue(v, &lt)
-	vv, ok := v.(map[string]interface{})
+	vv, ok := v.(map[string]any)
 	if !ok {
 		return nil, nil, &configErr{tk, fmt.Sprintf("Export Items should be a map with type entry, got %T", v)}
 	}
@@ -3344,6 +4146,11 @@ func parseExportStreamOrService(v interface{}, errors, warnings *[]error) (*expo
 			}
 			if latToken != nil {
 				err := &configErr{latToken, "Detected latency directive on non-service"}
+				*errors = append(*errors, err)
+				continue
+			}
+			if atrcToken != nil {
+				err := &configErr{atrcToken, "Detected allow_trace directive on non-service"}
 				*errors = append(*errors, err)
 				continue
 			}
@@ -3381,6 +4188,9 @@ func parseExportStreamOrService(v interface{}, errors, warnings *[]error) (*expo
 			}
 			if threshSeen {
 				curService.rthr = thresh
+			}
+			if atrcSeen {
+				curService.atrc = atrc
 			}
 		case "response", "response_type":
 			if rtSeen {
@@ -3443,7 +4253,7 @@ func parseExportStreamOrService(v interface{}, errors, warnings *[]error) (*expo
 				*errors = append(*errors, err)
 			}
 		case "accounts":
-			for _, iv := range mv.([]interface{}) {
+			for _, iv := range mv.([]any) {
 				_, mv := unwrapValue(iv, &lt)
 				accounts = append(accounts, mv.(string))
 			}
@@ -3470,6 +4280,18 @@ func parseExportStreamOrService(v interface{}, errors, warnings *[]error) (*expo
 			}
 		case "account_token_position":
 			accTokPos = uint(mv.(int64))
+		case "allow_trace":
+			atrcSeen = true
+			atrcToken = tk
+			atrc = mv.(bool)
+			if curStream != nil {
+				*errors = append(*errors,
+					&configErr{tk, "Detected allow_trace directive on non-service"})
+				continue
+			}
+			if curService != nil {
+				curService.atrc = atrc
+			}
 		default:
 			if !tk.IsUsedVariable() {
 				err := &unknownConfigFieldErr{
@@ -3492,7 +4314,7 @@ func parseExportStreamOrService(v interface{}, errors, warnings *[]error) (*expo
 }
 
 // parseServiceLatency returns a latency config block.
-func parseServiceLatency(root token, v interface{}) (l *serviceLatency, retErr error) {
+func parseServiceLatency(root token, v any) (l *serviceLatency, retErr error) {
 	var lt token
 	defer convertPanicToError(&lt, &retErr)
 
@@ -3503,7 +4325,7 @@ func parseServiceLatency(root token, v interface{}) (l *serviceLatency, retErr e
 		}, nil
 	}
 
-	latency, ok := v.(map[string]interface{})
+	latency, ok := v.(map[string]any)
 	if !ok {
 		return nil, &configErr{token: root,
 			reason: fmt.Sprintf("Expected latency entry to be a map/struct or string, got %T", v)}
@@ -3573,18 +4395,21 @@ func parseServiceLatency(root token, v interface{}) (l *serviceLatency, retErr e
 // {stream: {account: "synadia", subject:"public.synadia"}, prefix: "imports.synadia"}
 // {stream: {account: "synadia", subject:"synadia.private.*"}}
 // {service: {account: "synadia", subject: "pub.special.request"}, to: "synadia.request"}
-func parseImportStreamOrService(v interface{}, errors, warnings *[]error) (*importStream, *importService, error) {
+func parseImportStreamOrService(v any, errors *[]error) (*importStream, *importService, error) {
 	var (
 		curStream  *importStream
 		curService *importService
 		pre, to    string
 		share      bool
 		lt         token
+		atrc       bool
+		atrcSeen   bool
+		atrcToken  token
 	)
 	defer convertPanicToErrorList(&lt, errors)
 
 	tk, mv := unwrapValue(v, &lt)
-	vv, ok := mv.(map[string]interface{})
+	vv, ok := mv.(map[string]any)
 	if !ok {
 		return nil, nil, &configErr{tk, fmt.Sprintf("Import Items should be a map with type entry, got %T", mv)}
 	}
@@ -3597,14 +4422,14 @@ func parseImportStreamOrService(v interface{}, errors, warnings *[]error) (*impo
 				*errors = append(*errors, err)
 				continue
 			}
-			ac, ok := mv.(map[string]interface{})
+			ac, ok := mv.(map[string]any)
 			if !ok {
 				err := &configErr{tk, fmt.Sprintf("Stream entry should be an account map, got %T", mv)}
 				*errors = append(*errors, err)
 				continue
 			}
 			// Make sure this is a map with account and subject
-			accountName, subject, err := parseAccount(ac, errors, warnings)
+			accountName, subject, err := parseAccount(ac, errors)
 			if err != nil {
 				*errors = append(*errors, err)
 				continue
@@ -3621,20 +4446,28 @@ func parseImportStreamOrService(v interface{}, errors, warnings *[]error) (*impo
 			if pre != _EMPTY_ {
 				curStream.pre = pre
 			}
+			if atrcSeen {
+				curStream.atrc = atrc
+			}
 		case "service":
 			if curStream != nil {
 				err := &configErr{tk, "Detected service but already saw a stream"}
 				*errors = append(*errors, err)
 				continue
 			}
-			ac, ok := mv.(map[string]interface{})
+			if atrcToken != nil {
+				err := &configErr{atrcToken, "Detected allow_trace directive on a non-stream"}
+				*errors = append(*errors, err)
+				continue
+			}
+			ac, ok := mv.(map[string]any)
 			if !ok {
 				err := &configErr{tk, fmt.Sprintf("Service entry should be an account map, got %T", mv)}
 				*errors = append(*errors, err)
 				continue
 			}
 			// Make sure this is a map with account and subject
-			accountName, subject, err := parseAccount(ac, errors, warnings)
+			accountName, subject, err := parseAccount(ac, errors)
 			if err != nil {
 				*errors = append(*errors, err)
 				continue
@@ -3674,6 +4507,18 @@ func parseImportStreamOrService(v interface{}, errors, warnings *[]error) (*impo
 			if curService != nil {
 				curService.share = share
 			}
+		case "allow_trace":
+			if curService != nil {
+				err := &configErr{tk, "Detected allow_trace directive on a non-stream"}
+				*errors = append(*errors, err)
+				continue
+			}
+			atrcSeen = true
+			atrc = mv.(bool)
+			atrcToken = tk
+			if curStream != nil {
+				curStream.atrc = atrc
+			}
 		default:
 			if !tk.IsUsedVariable() {
 				err := &unknownConfigFieldErr{
@@ -3708,9 +4553,9 @@ func applyDefaultPermissions(users []*User, nkeys []*NkeyUser, defaultP *Permiss
 }
 
 // Helper function to parse Authorization configs.
-func parseAuthorization(v interface{}, opts *Options, errors *[]error, warnings *[]error) (*authorization, error) {
+func parseAuthorization(v any, errors, warnings *[]error) (*authorization, error) {
 	var (
-		am   map[string]interface{}
+		am   map[string]any
 		tk   token
 		lt   token
 		auth = &authorization{}
@@ -3718,7 +4563,7 @@ func parseAuthorization(v interface{}, opts *Options, errors *[]error, warnings 
 	defer convertPanicToErrorList(&lt, errors)
 
 	_, v = unwrapValue(v, &lt)
-	am = v.(map[string]interface{})
+	am = v.(map[string]any)
 	for mk, mv := range am {
 		tk, mv = unwrapValue(mv, &lt)
 		switch strings.ToLower(mk) {
@@ -3729,16 +4574,28 @@ func parseAuthorization(v interface{}, opts *Options, errors *[]error, warnings 
 		case "token":
 			auth.token = mv.(string)
 		case "timeout":
-			at := float64(1)
+			at := float64(0)
 			switch mv := mv.(type) {
 			case int64:
 				at = float64(mv)
 			case float64:
 				at = mv
+			case string:
+				d, err := time.ParseDuration(mv)
+				if err != nil {
+					return nil, &configErr{tk, fmt.Sprintf("error parsing authorization config, 'timeout' %s", err)}
+				}
+				at = d.Seconds()
+			default:
+				return nil, &configErr{tk, "error parsing authorization config, 'timeout' wrong type"}
+			}
+			if at > (60 * time.Second).Seconds() {
+				reason := fmt.Sprintf("timeout of %v (%f seconds) is high, consider keeping it under 60 seconds. possibly caused by unquoted duration; use '1m' instead of 1m, for example", mv, at)
+				*warnings = append(*warnings, &configWarningErr{field: mk, configErr: configErr{token: tk, reason: reason}})
 			}
 			auth.timeout = at
 		case "users":
-			nkeys, users, err := parseUsers(tk, opts, errors, warnings)
+			nkeys, users, err := parseUsers(tk, errors)
 			if err != nil {
 				*errors = append(*errors, err)
 				continue
@@ -3746,19 +4603,25 @@ func parseAuthorization(v interface{}, opts *Options, errors *[]error, warnings 
 			auth.users = users
 			auth.nkeys = nkeys
 		case "default_permission", "default_permissions", "permissions":
-			permissions, err := parseUserPermissions(tk, errors, warnings)
+			permissions, err := parseUserPermissions(tk, errors)
 			if err != nil {
 				*errors = append(*errors, err)
 				continue
 			}
 			auth.defaultPermissions = permissions
 		case "auth_callout", "auth_hook":
-			ac, err := parseAuthCallout(tk, errors, warnings)
+			if fips140.Enabled() {
+				*errors = append(*errors, fmt.Errorf("'auth_callout' cannot be configured in FIPS-140 mode"))
+				continue
+			}
+			ac, err := parseAuthCallout(tk, errors)
 			if err != nil {
 				*errors = append(*errors, err)
 				continue
 			}
 			auth.callout = ac
+		case "proxy_required":
+			auth.proxyRequired = mv.(bool)
 		default:
 			if !tk.IsUsedVariable() {
 				err := &unknownConfigFieldErr{
@@ -3778,7 +4641,7 @@ func parseAuthorization(v interface{}, opts *Options, errors *[]error, warnings 
 }
 
 // Helper function to parse multiple users array with optional permissions.
-func parseUsers(mv interface{}, opts *Options, errors *[]error, warnings *[]error) ([]*NkeyUser, []*User, error) {
+func parseUsers(mv any, errors *[]error) ([]*NkeyUser, []*User, error) {
 	var (
 		tk    token
 		lt    token
@@ -3789,7 +4652,7 @@ func parseUsers(mv interface{}, opts *Options, errors *[]error, warnings *[]erro
 	tk, mv = unwrapValue(mv, &lt)
 
 	// Make sure we have an array
-	uv, ok := mv.([]interface{})
+	uv, ok := mv.([]any)
 	if !ok {
 		return nil, nil, &configErr{tk, fmt.Sprintf("Expected users field to be an array, got %v", mv)}
 	}
@@ -3797,7 +4660,7 @@ func parseUsers(mv interface{}, opts *Options, errors *[]error, warnings *[]erro
 		tk, u = unwrapValue(u, &lt)
 
 		// Check its a map/struct
-		um, ok := u.(map[string]interface{})
+		um, ok := u.(map[string]any)
 		if !ok {
 			err := &configErr{tk, fmt.Sprintf("Expected user entry to be a map/struct, got %v", u)}
 			*errors = append(*errors, err)
@@ -3822,15 +4685,18 @@ func parseUsers(mv interface{}, opts *Options, errors *[]error, warnings *[]erro
 			case "pass", "password":
 				user.Password = v.(string)
 			case "permission", "permissions", "authorization":
-				perms, err = parseUserPermissions(tk, errors, warnings)
+				perms, err = parseUserPermissions(tk, errors)
 				if err != nil {
 					*errors = append(*errors, err)
 					continue
 				}
 			case "allowed_connection_types", "connection_types", "clients":
-				cts := parseAllowedConnectionTypes(tk, &lt, v, errors, warnings)
+				cts := parseAllowedConnectionTypes(tk, &lt, v, errors)
 				nkey.AllowedConnectionTypes = cts
 				user.AllowedConnectionTypes = cts
+			case "proxy_required":
+				nkey.ProxyRequired = v.(bool)
+				user.ProxyRequired = v.(bool)
 			default:
 				if !tk.IsUsedVariable() {
 					err := &unknownConfigFieldErr{
@@ -3874,8 +4740,8 @@ func parseUsers(mv interface{}, opts *Options, errors *[]error, warnings *[]erro
 	return keys, users, nil
 }
 
-func parseAllowedConnectionTypes(tk token, lt *token, mv interface{}, errors *[]error, warnings *[]error) map[string]struct{} {
-	cts, err := parseStringArray("allowed connection types", tk, lt, mv, errors, warnings)
+func parseAllowedConnectionTypes(tk token, lt *token, mv any, errors *[]error) map[string]struct{} {
+	cts, err := parseStringArray("allowed connection types", tk, lt, mv, errors)
 	// If error, it has already been added to the `errors` array, simply return
 	if err != nil {
 		return nil
@@ -3888,7 +4754,7 @@ func parseAllowedConnectionTypes(tk token, lt *token, mv interface{}, errors *[]
 }
 
 // Helper function to parse auth callouts.
-func parseAuthCallout(mv interface{}, errors, warnings *[]error) (*AuthCallout, error) {
+func parseAuthCallout(mv any, errors *[]error) (*AuthCallout, error) {
 	var (
 		tk token
 		lt token
@@ -3897,7 +4763,7 @@ func parseAuthCallout(mv interface{}, errors, warnings *[]error) (*AuthCallout, 
 	defer convertPanicToErrorList(&lt, errors)
 
 	tk, mv = unwrapValue(mv, &lt)
-	pm, ok := mv.(map[string]interface{})
+	pm, ok := mv.(map[string]any)
 	if !ok {
 		return nil, &configErr{tk, fmt.Sprintf("Expected authorization callout to be a map/struct, got %+v", mv)}
 	}
@@ -3913,7 +4779,7 @@ func parseAuthCallout(mv interface{}, errors, warnings *[]error) (*AuthCallout, 
 		case "account", "acc":
 			ac.Account = mv.(string)
 		case "auth_users", "users":
-			aua, ok := mv.([]interface{})
+			aua, ok := mv.([]any)
 			if !ok {
 				return nil, &configErr{tk, fmt.Sprintf("Expected auth_users field to be an array, got %T", v)}
 			}
@@ -3925,6 +4791,15 @@ func parseAuthCallout(mv interface{}, errors, warnings *[]error) (*AuthCallout, 
 			ac.XKey = mv.(string)
 			if !nkeys.IsValidPublicCurveKey(ac.XKey) {
 				return nil, &configErr{tk, fmt.Sprintf("Expected callout xkey to be a valid public xkey, got %q", ac.XKey)}
+			}
+		case "allowed_accounts":
+			aua, ok := mv.([]any)
+			if !ok {
+				return nil, &configErr{tk, fmt.Sprintf("Expected allowed accounts field to be an array, got %T", v)}
+			}
+			for _, uv := range aua {
+				_, uv = unwrapValue(uv, &lt)
+				ac.AllowedAccounts = append(ac.AllowedAccounts, uv.(string))
 			}
 		default:
 			if !tk.IsUsedVariable() {
@@ -3948,7 +4823,7 @@ func parseAuthCallout(mv interface{}, errors, warnings *[]error) (*AuthCallout, 
 }
 
 // Helper function to parse user/account permissions
-func parseUserPermissions(mv interface{}, errors, warnings *[]error) (*Permissions, error) {
+func parseUserPermissions(mv any, errors *[]error) (*Permissions, error) {
 	var (
 		tk token
 		lt token
@@ -3957,7 +4832,7 @@ func parseUserPermissions(mv interface{}, errors, warnings *[]error) (*Permissio
 	defer convertPanicToErrorList(&lt, errors)
 
 	tk, mv = unwrapValue(mv, &lt)
-	pm, ok := mv.(map[string]interface{})
+	pm, ok := mv.(map[string]any)
 	if !ok {
 		return nil, &configErr{tk, fmt.Sprintf("Expected permissions to be a map/struct, got %+v", mv)}
 	}
@@ -3969,14 +4844,14 @@ func parseUserPermissions(mv interface{}, errors, warnings *[]error) (*Permissio
 		// Import is Publish
 		// Export is Subscribe
 		case "pub", "publish", "import":
-			perms, err := parseVariablePermissions(mv, errors, warnings)
+			perms, err := parseVariablePermissions(mv, errors, false)
 			if err != nil {
 				*errors = append(*errors, err)
 				continue
 			}
 			p.Publish = perms
 		case "sub", "subscribe", "export":
-			perms, err := parseVariablePermissions(mv, errors, warnings)
+			perms, err := parseVariablePermissions(mv, errors, true)
 			if err != nil {
 				*errors = append(*errors, err)
 				continue
@@ -3994,7 +4869,7 @@ func parseUserPermissions(mv interface{}, errors, warnings *[]error) (*Permissio
 					p.Response = rp
 				}
 			} else {
-				p.Response = parseAllowResponses(v, errors, warnings)
+				p.Response = parseAllowResponses(v, errors)
 			}
 			if p.Response != nil {
 				if p.Publish == nil {
@@ -4016,19 +4891,19 @@ func parseUserPermissions(mv interface{}, errors, warnings *[]error) (*Permissio
 }
 
 // Top level parser for authorization configurations.
-func parseVariablePermissions(v interface{}, errors, warnings *[]error) (*SubjectPermission, error) {
+func parseVariablePermissions(v any, errors *[]error, allowQueue bool) (*SubjectPermission, error) {
 	switch vv := v.(type) {
-	case map[string]interface{}:
+	case map[string]any:
 		// New style with allow and/or deny properties.
-		return parseSubjectPermission(vv, errors, warnings)
+		return parseSubjectPermission(vv, errors, allowQueue)
 	default:
 		// Old style
-		return parseOldPermissionStyle(v, errors, warnings)
+		return parseOldPermissionStyle(v, errors, allowQueue)
 	}
 }
 
 // Helper function to parse subject singletons and/or arrays
-func parsePermSubjects(v interface{}, errors, warnings *[]error) ([]string, error) {
+func parsePermSubjects(v any, errors *[]error, allowQueue bool) ([]string, error) {
 	var lt token
 	defer convertPanicToErrorList(&lt, errors)
 
@@ -4040,7 +4915,7 @@ func parsePermSubjects(v interface{}, errors, warnings *[]error) ([]string, erro
 		subjects = append(subjects, vv)
 	case []string:
 		subjects = vv
-	case []interface{}:
+	case []any:
 		for _, i := range vv {
 			tk, i := unwrapValue(i, &lt)
 
@@ -4053,20 +4928,20 @@ func parsePermSubjects(v interface{}, errors, warnings *[]error) ([]string, erro
 	default:
 		return nil, &configErr{tk, fmt.Sprintf("Expected subject permissions to be a subject, or array of subjects, got %T", v)}
 	}
-	if err := checkPermSubjectArray(subjects); err != nil {
+	if err := checkPermSubjectArray(subjects, allowQueue); err != nil {
 		return nil, &configErr{tk, err.Error()}
 	}
 	return subjects, nil
 }
 
 // Helper function to parse a ResponsePermission.
-func parseAllowResponses(v interface{}, errors, warnings *[]error) *ResponsePermission {
+func parseAllowResponses(v any, errors *[]error) *ResponsePermission {
 	var lt token
 	defer convertPanicToErrorList(&lt, errors)
 
 	tk, v := unwrapValue(v, &lt)
 	// Check if this is a map.
-	pm, ok := v.(map[string]interface{})
+	pm, ok := v.(map[string]any)
 	if !ok {
 		err := &configErr{tk, "error parsing response permissions, expected a boolean or a map"}
 		*errors = append(*errors, err)
@@ -4118,8 +4993,8 @@ func parseAllowResponses(v interface{}, errors, warnings *[]error) *ResponsePerm
 }
 
 // Helper function to parse old style authorization configs.
-func parseOldPermissionStyle(v interface{}, errors, warnings *[]error) (*SubjectPermission, error) {
-	subjects, err := parsePermSubjects(v, errors, warnings)
+func parseOldPermissionStyle(v any, errors *[]error, allowQueue bool) (*SubjectPermission, error) {
+	subjects, err := parsePermSubjects(v, errors, allowQueue)
 	if err != nil {
 		return nil, err
 	}
@@ -4127,11 +5002,11 @@ func parseOldPermissionStyle(v interface{}, errors, warnings *[]error) (*Subject
 }
 
 // Helper function to parse new style authorization into a SubjectPermission with Allow and Deny.
-func parseSubjectPermission(v interface{}, errors, warnings *[]error) (*SubjectPermission, error) {
+func parseSubjectPermission(v any, errors *[]error, allowQueue bool) (*SubjectPermission, error) {
 	var lt token
 	defer convertPanicToErrorList(&lt, errors)
 
-	m := v.(map[string]interface{})
+	m := v.(map[string]any)
 	if len(m) == 0 {
 		return nil, nil
 	}
@@ -4140,14 +5015,14 @@ func parseSubjectPermission(v interface{}, errors, warnings *[]error) (*SubjectP
 		tk, _ := unwrapValue(v, &lt)
 		switch strings.ToLower(k) {
 		case "allow":
-			subjects, err := parsePermSubjects(tk, errors, warnings)
+			subjects, err := parsePermSubjects(tk, errors, allowQueue)
 			if err != nil {
 				*errors = append(*errors, err)
 				continue
 			}
 			p.Allow = subjects
 		case "deny":
-			subjects, err := parsePermSubjects(tk, errors, warnings)
+			subjects, err := parsePermSubjects(tk, errors, allowQueue)
 			if err != nil {
 				*errors = append(*errors, err)
 				continue
@@ -4164,15 +5039,20 @@ func parseSubjectPermission(v interface{}, errors, warnings *[]error) (*SubjectP
 }
 
 // Helper function to validate permissions subjects.
-func checkPermSubjectArray(sa []string) error {
+func checkPermSubjectArray(sa []string, allowQueue bool) error {
 	for _, s := range sa {
 		if !IsValidSubject(s) {
+			if !allowQueue {
+				return fmt.Errorf("subject %q is not a valid subject", s)
+			}
 			// Check here if this is a queue group qualified subject.
 			elements := strings.Fields(s)
 			if len(elements) != 2 {
 				return fmt.Errorf("subject %q is not a valid subject", s)
 			} else if !IsValidSubject(elements[0]) {
 				return fmt.Errorf("subject %q is not a valid subject", elements[0])
+			} else if !IsValidSubject(elements[1]) {
+				return fmt.Errorf("queue %q is not a valid queue", elements[1])
 			}
 		}
 	}
@@ -4197,12 +5077,11 @@ func PrintTLSHelpAndDie() {
 	os.Exit(0)
 }
 
-func parseCipher(cipherName string) (uint16, error) {
+func parseCipher(cipherName string) (*tls.CipherSuite, error) {
 	cipher, exists := cipherMap[cipherName]
 	if !exists {
-		return 0, fmt.Errorf("unrecognized cipher %s", cipherName)
+		return nil, fmt.Errorf("unrecognized cipher %s", cipherName)
 	}
-
 	return cipher, nil
 }
 
@@ -4214,17 +5093,36 @@ func parseCurvePreferences(curveName string) (tls.CurveID, error) {
 	return curve, nil
 }
 
+func parseTLSVersion(v any) (uint16, error) {
+	var tlsVersionNumber uint16
+	switch v := v.(type) {
+	case string:
+		n, err := tlsVersionFromString(v)
+		if err != nil {
+			return 0, err
+		}
+		tlsVersionNumber = n
+	default:
+		return 0, fmt.Errorf("'min_version' wrong type: %v", v)
+	}
+	if tlsVersionNumber < tls.VersionTLS12 {
+		return 0, fmt.Errorf("unsupported TLS version: %s", tls.VersionName(tlsVersionNumber))
+	}
+	return tlsVersionNumber, nil
+}
+
 // Helper function to parse TLS configs.
-func parseTLS(v interface{}, isClientCtx bool) (t *TLSConfigOpts, retErr error) {
+func parseTLS(v any, isClientCtx bool) (t *TLSConfigOpts, retErr error) {
 	var (
-		tlsm map[string]interface{}
+		tlsm map[string]any
 		tc   = TLSConfigOpts{}
 		lt   token
+		ics  []*tls.CipherSuite // Insecure ciphers found
 	)
 	defer convertPanicToError(&lt, &retErr)
 
 	tk, v := unwrapValue(v, &lt)
-	tlsm = v.(map[string]interface{})
+	tlsm = v.(map[string]any)
 	for mk, mv := range tlsm {
 		tk, mv := unwrapValue(mv, &lt)
 		switch strings.ToLower(mk) {
@@ -4279,8 +5177,14 @@ func parseTLS(v interface{}, isClientCtx bool) (t *TLSConfigOpts, retErr error) 
 				tc.Verify = verify
 			}
 			tc.TLSCheckKnownURLs = verify
+		case "allow_insecure_cipher_suites":
+			allow, ok := mv.(bool)
+			if !ok {
+				return nil, &configErr{tk, "error parsing tls config, expected 'allow_insecure_cipher_suites' to be a boolean"}
+			}
+			tc.AllowInsecureCiphers = allow
 		case "cipher_suites":
-			ra := mv.([]interface{})
+			ra := mv.([]any)
 			if len(ra) == 0 {
 				return nil, &configErr{tk, "error parsing tls config, 'cipher_suites' cannot be empty"}
 			}
@@ -4291,10 +5195,13 @@ func parseTLS(v interface{}, isClientCtx bool) (t *TLSConfigOpts, retErr error) 
 				if err != nil {
 					return nil, &configErr{tk, err.Error()}
 				}
-				tc.Ciphers = append(tc.Ciphers, cipher)
+				tc.Ciphers = append(tc.Ciphers, cipher.ID)
+				if cipher.Insecure {
+					ics = append(ics, cipher)
+				}
 			}
 		case "curve_preferences":
-			ra := mv.([]interface{})
+			ra := mv.([]any)
 			if len(ra) == 0 {
 				return nil, &configErr{tk, "error parsing tls config, 'curve_preferences' cannot be empty"}
 			}
@@ -4334,7 +5241,7 @@ func parseTLS(v interface{}, isClientCtx bool) (t *TLSConfigOpts, retErr error) 
 			}
 			tc.RateLimit = at
 		case "pinned_certs":
-			ra, ok := mv.([]interface{})
+			ra, ok := mv.([]any)
 			if !ok {
 				return nil, &configErr{tk, "error parsing tls config, expected 'pinned_certs' to be a list of hex-encoded sha256 of DER encoded SubjectPublicKeyInfo"}
 			}
@@ -4377,6 +5284,28 @@ func parseTLS(v interface{}, isClientCtx bool) (t *TLSConfigOpts, retErr error) 
 				return nil, &configErr{tk, certstore.ErrBadCertMatchField.Error()}
 			}
 			tc.CertMatch = certMatch
+		case "ca_certs_match":
+			rv := []string{}
+			switch mv := mv.(type) {
+			case string:
+				rv = append(rv, mv)
+			case []string:
+				rv = append(rv, mv...)
+			case []any:
+				for _, t := range mv {
+					if token, ok := t.(token); ok {
+						if ts, ok := token.Value().(string); ok {
+							rv = append(rv, ts)
+							continue
+						} else {
+							return nil, &configErr{tk, fmt.Sprintf("error parsing ca_cert_match: unsupported type %T where string is expected", token)}
+						}
+					} else {
+						return nil, &configErr{tk, fmt.Sprintf("error parsing ca_cert_match: unsupported type %T", t)}
+					}
+				}
+			}
+			tc.CaCertsMatch = rv
 		case "handshake_first", "first", "immediate":
 			switch mv := mv.(type) {
 			case bool:
@@ -4402,6 +5331,12 @@ func parseTLS(v interface{}, isClientCtx bool) (t *TLSConfigOpts, retErr error) 
 			default:
 				return nil, &configErr{tk, fmt.Sprintf("field %q should be a boolean or a string, got %T", mk, mv)}
 			}
+		case "cert_match_skip_invalid":
+			certMatchSkipInvalid, ok := mv.(bool)
+			if !ok {
+				return nil, &configErr{tk, certstore.ErrBadCertMatchSkipInvalidField.Error()}
+			}
+			tc.CertMatchSkipInvalid = certMatchSkipInvalid
 		case "ocsp_peer":
 			switch vv := mv.(type) {
 			case bool:
@@ -4415,7 +5350,7 @@ func parseTLS(v interface{}, isClientCtx bool) (t *TLSConfigOpts, retErr error) 
 					pc.Verify = false
 					tc.OCSPPeerConfig = pc
 				}
-			case map[string]interface{}:
+			case map[string]any:
 				pc, err := parseOCSPPeer(mv)
 				if err != nil {
 					return nil, &configErr{tk, err.Error()}
@@ -4425,14 +5360,14 @@ func parseTLS(v interface{}, isClientCtx bool) (t *TLSConfigOpts, retErr error) 
 				return nil, &configErr{tk, fmt.Sprintf("error parsing ocsp peer config: unsupported type %T", v)}
 			}
 		case "certs", "certificates":
-			certs, ok := mv.([]interface{})
+			certs, ok := mv.([]any)
 			if !ok {
 				return nil, &configErr{tk, fmt.Sprintf("error parsing certificates config: unsupported type %T", v)}
 			}
 			tc.Certificates = make([]*TLSCertPairOpt, len(certs))
 			for i, v := range certs {
 				tk, vv := unwrapValue(v, &lt)
-				pair, ok := vv.(map[string]interface{})
+				pair, ok := vv.(map[string]any)
 				if !ok {
 					return nil, &configErr{tk, fmt.Sprintf("error parsing certificates config: unsupported type %T", vv)}
 				}
@@ -4457,6 +5392,12 @@ func parseTLS(v interface{}, isClientCtx bool) (t *TLSConfigOpts, retErr error) 
 				}
 				tc.Certificates[i] = certPair
 			}
+		case "min_version":
+			minVersion, err := parseTLSVersion(mv)
+			if err != nil {
+				return nil, &configErr{tk, fmt.Sprintf("error parsing tls config: %v", err)}
+			}
+			tc.MinVersion = minVersion
 		default:
 			return nil, &configErr{tk, fmt.Sprintf("error parsing tls config, unknown field %q", mk)}
 		}
@@ -4475,12 +5416,22 @@ func parseTLS(v interface{}, isClientCtx bool) (t *TLSConfigOpts, retErr error) 
 		tc.CurvePreferences = defaultCurvePreferences()
 	}
 
+	// If we don't allow insecure ciphers, and yet some were configured, then we
+	// should error.
+	if !tc.AllowInsecureCiphers && len(ics) > 0 {
+		names := make([]string, 0, len(ics))
+		for _, ic := range ics {
+			names = append(names, ic.Name)
+		}
+		return nil, &configErr{tk, fmt.Sprintf("insecure cipher suites configured without 'allow_insecure_cipher_suites' option set: %s", strings.Join(names, ", "))}
+	}
+
 	return &tc, nil
 }
 
-func parseSimpleAuth(v interface{}, errors *[]error, warnings *[]error) *authorization {
+func parseSimpleAuth(v any, errors *[]error) *authorization {
 	var (
-		am   map[string]interface{}
+		am   map[string]any
 		tk   token
 		lt   token
 		auth = &authorization{}
@@ -4488,7 +5439,7 @@ func parseSimpleAuth(v interface{}, errors *[]error, warnings *[]error) *authori
 	defer convertPanicToErrorList(&lt, errors)
 
 	_, v = unwrapValue(v, &lt)
-	am = v.(map[string]interface{})
+	am = v.(map[string]any)
 	for mk, mv := range am {
 		tk, mv = unwrapValue(mv, &lt)
 		switch strings.ToLower(mk) {
@@ -4523,11 +5474,11 @@ func parseSimpleAuth(v interface{}, errors *[]error, warnings *[]error) *authori
 	return auth
 }
 
-func parseStringArray(fieldName string, tk token, lt *token, mv interface{}, errors *[]error, warnings *[]error) ([]string, error) {
+func parseStringArray(fieldName string, tk token, lt *token, mv any, errors *[]error) ([]string, error) {
 	switch mv := mv.(type) {
 	case string:
 		return []string{mv}, nil
-	case []interface{}:
+	case []any:
 		strs := make([]string, 0, len(mv))
 		for _, val := range mv {
 			tk, val = unwrapValue(val, lt)
@@ -4547,12 +5498,12 @@ func parseStringArray(fieldName string, tk token, lt *token, mv interface{}, err
 	}
 }
 
-func parseWebsocket(v interface{}, o *Options, errors *[]error, warnings *[]error) error {
+func parseWebsocket(v any, o *Options, errors *[]error, warnings *[]error) error {
 	var lt token
 	defer convertPanicToErrorList(&lt, errors)
 
 	tk, v := unwrapValue(v, &lt)
-	gm, ok := v.(map[string]interface{})
+	gm, ok := v.(map[string]any)
 	if !ok {
 		return &configErr{tk, fmt.Sprintf("Expected websocket to be a map, got %T", v)}
 	}
@@ -4594,7 +5545,7 @@ func parseWebsocket(v interface{}, o *Options, errors *[]error, warnings *[]erro
 		case "same_origin":
 			o.Websocket.SameOrigin = mv.(bool)
 		case "allowed_origins", "allowed_origin", "allow_origins", "allow_origin", "origins", "origin":
-			o.Websocket.AllowedOrigins, _ = parseStringArray("allowed origins", tk, &lt, mv, errors, warnings)
+			o.Websocket.AllowedOrigins, _ = parseStringArray("allowed origins", tk, &lt, mv, errors)
 		case "handshake_timeout":
 			ht := time.Duration(0)
 			switch mv := mv.(type) {
@@ -4616,15 +5567,40 @@ func parseWebsocket(v interface{}, o *Options, errors *[]error, warnings *[]erro
 		case "compress", "compression":
 			o.Websocket.Compression = mv.(bool)
 		case "authorization", "authentication":
-			auth := parseSimpleAuth(tk, errors, warnings)
+			auth := parseSimpleAuth(tk, errors)
 			o.Websocket.Username = auth.user
 			o.Websocket.Password = auth.pass
 			o.Websocket.Token = auth.token
 			o.Websocket.AuthTimeout = auth.timeout
 		case "jwt_cookie":
 			o.Websocket.JWTCookie = mv.(string)
+		case "user_cookie":
+			o.Websocket.UsernameCookie = mv.(string)
+		case "pass_cookie":
+			o.Websocket.PasswordCookie = mv.(string)
+		case "token_cookie":
+			o.Websocket.TokenCookie = mv.(string)
 		case "no_auth_user":
 			o.Websocket.NoAuthUser = mv.(string)
+		case "headers":
+			m, ok := mv.(map[string]any)
+			if !ok {
+				err := &configErr{tk, fmt.Sprintf("error parsing headers: unsupported type %T", mv)}
+				*errors = append(*errors, err)
+				continue
+			}
+			o.Websocket.Headers = make(map[string]string)
+			for key, val := range m {
+				tk, val = unwrapValue(val, &lt)
+				if headerValue, ok := val.(string); !ok {
+					*errors = append(*errors, &configErr{tk, fmt.Sprintf("error parsing header key %s: unsupported type %T", key, val)})
+					continue
+				} else {
+					o.Websocket.Headers[key] = headerValue
+				}
+			}
+		case "ping_interval":
+			o.Websocket.PingInterval = parseDuration("ping_interval", tk, mv, errors, warnings)
 		default:
 			if !tk.IsUsedVariable() {
 				err := &unknownConfigFieldErr{
@@ -4641,12 +5617,12 @@ func parseWebsocket(v interface{}, o *Options, errors *[]error, warnings *[]erro
 	return nil
 }
 
-func parseMQTT(v interface{}, o *Options, errors *[]error, warnings *[]error) error {
+func parseMQTT(v any, o *Options, errors *[]error, warnings *[]error) error {
 	var lt token
 	defer convertPanicToErrorList(&lt, errors)
 
 	tk, v := unwrapValue(v, &lt)
-	gm, ok := v.(map[string]interface{})
+	gm, ok := v.(map[string]any)
 	if !ok {
 		return &configErr{tk, fmt.Sprintf("Expected mqtt to be a map, got %T", v)}
 	}
@@ -4683,7 +5659,7 @@ func parseMQTT(v interface{}, o *Options, errors *[]error, warnings *[]error) er
 			o.MQTT.TLSPinnedCerts = tc.PinnedCerts
 			o.MQTT.tlsConfigOpts = tc
 		case "authorization", "authentication":
-			auth := parseSimpleAuth(tk, errors, warnings)
+			auth := parseSimpleAuth(tk, errors)
 			o.MQTT.Username = auth.user
 			o.MQTT.Password = auth.pass
 			o.MQTT.Token = auth.token
@@ -4692,6 +5668,8 @@ func parseMQTT(v interface{}, o *Options, errors *[]error, warnings *[]error) er
 			o.MQTT.NoAuthUser = mv.(string)
 		case "ack_wait", "ackwait":
 			o.MQTT.AckWait = parseDuration("ack_wait", tk, mv, errors, warnings)
+		case "js_api_timeout", "api_timeout":
+			o.MQTT.JSAPITimeout = parseDuration("js_api_timeout", tk, mv, errors, warnings)
 		case "max_ack_pending", "max_pending", "max_inflight":
 			tmp := int(mv.(int64))
 			if tmp < 0 || tmp > 0xFFFF {
@@ -4739,17 +5717,105 @@ func parseMQTT(v interface{}, o *Options, errors *[]error, warnings *[]error) er
 	return nil
 }
 
+func parseProxies(mv any, errors *[]error) (*ProxiesConfig, error) {
+	var (
+		tk      token
+		lt      token
+		proxies = &ProxiesConfig{}
+	)
+	defer convertPanicToErrorList(&lt, errors)
+
+	tk, mv = unwrapValue(mv, &lt)
+	pm, ok := mv.(map[string]any)
+	if !ok {
+		return nil, &configErr{tk, fmt.Sprintf("expected proxies to be a map/struct, got %T", mv)}
+	}
+	for mk, mv := range pm {
+		tk, _ = unwrapValue(mv, &lt)
+
+		switch strings.ToLower(mk) {
+		case "trusted":
+			trusted, err := parseProxiesTrusted(tk, errors)
+			if err != nil {
+				*errors = append(*errors, err)
+				continue
+			}
+			proxies.Trusted = trusted
+		default:
+			if !tk.IsUsedVariable() {
+				err := &unknownConfigFieldErr{
+					field: mk,
+					configErr: configErr{
+						token: tk,
+					},
+				}
+				*errors = append(*errors, err)
+			}
+		}
+	}
+	return proxies, nil
+}
+
+func parseProxiesTrusted(mv any, errors *[]error) ([]*ProxyConfig, error) {
+	var (
+		tk      token
+		lt      token
+		trusted []*ProxyConfig
+	)
+	defer convertPanicToErrorList(&lt, errors)
+
+	tk, mv = unwrapValue(mv, &lt)
+	ta, ok := mv.([]any)
+	if !ok {
+		return nil, &configErr{tk, fmt.Sprintf("expected proxies' trusted field to be an array, got %T", mv)}
+	}
+	for _, t := range ta {
+		tk, t = unwrapValue(t, &lt)
+		// Check its a map/struct
+		tm, ok := t.(map[string]any)
+		if !ok {
+			err := &configErr{tk, fmt.Sprintf("expected proxies' trusted entry to be a map/struct, got %T", t)}
+			*errors = append(*errors, err)
+			continue
+		}
+		proxy := &ProxyConfig{}
+		for k, v := range tm {
+			tk, v = unwrapValue(v, &lt)
+			switch strings.ToLower(k) {
+			case "key", "public_key":
+				proxy.Key = v.(string)
+				if !nkeys.IsValidPublicKey(proxy.Key) {
+					*errors = append(*errors, &configErr{tk, fmt.Sprintf("invalid proxy key %q", proxy.Key)})
+					continue
+				}
+			default:
+				if !tk.IsUsedVariable() {
+					err := &unknownConfigFieldErr{
+						field: k,
+						configErr: configErr{
+							token: tk,
+						},
+					}
+					*errors = append(*errors, err)
+					continue
+				}
+			}
+		}
+		trusted = append(trusted, proxy)
+	}
+	return trusted, nil
+}
+
 // GenTLSConfig loads TLS related configuration parameters.
 func GenTLSConfig(tc *TLSConfigOpts) (*tls.Config, error) {
 	// Create the tls.Config from our options before including the certs.
 	// It will determine the cipher suites that we prefer.
 	// FIXME(dlc) change if ARM based.
 	config := tls.Config{
-		MinVersion:               tls.VersionTLS12,
-		CipherSuites:             tc.Ciphers,
-		PreferServerCipherSuites: true,
-		CurvePreferences:         tc.CurvePreferences,
-		InsecureSkipVerify:       tc.Insecure,
+		MinVersion:         tls.VersionTLS12,
+		CipherSuites:       tc.Ciphers,
+		CurvePreferences:   tc.CurvePreferences,
+		InsecureSkipVerify: tc.Insecure,
 	}
 
 	switch {
@@ -4771,7 +5837,7 @@ func GenTLSConfig(tc *TLSConfigOpts) (*tls.Config, error) {
 		}
 		config.Certificates = []tls.Certificate{cert}
 	case tc.CertStore != certstore.STOREEMPTY:
-		err := certstore.TLSConfig(tc.CertStore, tc.CertMatchBy, tc.CertMatch, &config)
+		err := certstore.TLSConfig(tc.CertStore, tc.CertMatchBy, tc.CertMatch, tc.CaCertsMatch, tc.CertMatchSkipInvalid, &config)
 		if err != nil {
 			return nil, err
 		}
@@ -4807,6 +5873,13 @@ func GenTLSConfig(tc *TLSConfigOpts) (*tls.Config, error) {
 			return nil, fmt.Errorf("failed to parse root ca certificate")
 		}
 		config.ClientCAs = pool
+	}
+	// Allow setting TLS minimum version.
+	if tc.MinVersion > 0 {
+		if tc.MinVersion < tls.VersionTLS12 {
+			return nil, fmt.Errorf("unsupported minimum TLS version: %s", tls.VersionName(tc.MinVersion))
+		}
+		config.MinVersion = tc.MinVersion
 	}
 
 	return &config, nil
@@ -4888,7 +5961,10 @@ func MergeOptions(fileOpts, flagOpts *Options) *Options {
 		mergeRoutes(&opts, flagOpts)
 	}
 	if flagOpts.JetStream {
-		fileOpts.JetStream = flagOpts.JetStream
+		opts.JetStream = flagOpts.JetStream
+	}
+	if flagOpts.StoreDir != _EMPTY_ {
+		opts.StoreDir = flagOpts.StoreDir
 	}
 	return &opts
 }
@@ -4916,86 +5992,6 @@ func mergeRoutes(opts, flagOpts *Options) {
 	}
 	opts.Routes = routeUrls
 	opts.RoutesStr = flagOpts.RoutesStr
-}
-
-// RemoveSelfReference removes this server from an array of routes
-func RemoveSelfReference(clusterPort int, routes []*url.URL) ([]*url.URL, error) {
-	var cleanRoutes []*url.URL
-	cport := strconv.Itoa(clusterPort)
-
-	selfIPs, err := getInterfaceIPs()
-	if err != nil {
-		return nil, err
-	}
-	for _, r := range routes {
-		host, port, err := net.SplitHostPort(r.Host)
-		if err != nil {
-			return nil, err
-		}
-
-		ipList, err := getURLIP(host)
-		if err != nil {
-			return nil, err
-		}
-		if cport == port && isIPInList(selfIPs, ipList) {
-			continue
-		}
-		cleanRoutes = append(cleanRoutes, r)
-	}
-
-	return cleanRoutes, nil
-}
-
-func isIPInList(list1 []net.IP, list2 []net.IP) bool {
-	for _, ip1 := range list1 {
-		for _, ip2 := range list2 {
-			if ip1.Equal(ip2) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func getURLIP(ipStr string) ([]net.IP, error) {
-	ipList := []net.IP{}
-
-	ip := net.ParseIP(ipStr)
-	if ip != nil {
-		ipList = append(ipList, ip)
-		return ipList, nil
-	}
-
-	hostAddr, err := net.LookupHost(ipStr)
-	if err != nil {
-		return nil, fmt.Errorf("Error looking up host with route hostname: %v", err)
-	}
-	for _, addr := range hostAddr {
-		ip = net.ParseIP(addr)
-		if ip != nil {
-			ipList = append(ipList, ip)
-		}
-	}
-	return ipList, nil
-}
-
-func getInterfaceIPs() ([]net.IP, error) {
-	var localIPs []net.IP
-
-	interfaceAddr, err := net.InterfaceAddrs()
-	if err != nil {
-		return nil, fmt.Errorf("Error getting self referencing address: %v", err)
-	}
-
-	for i := 0; i < len(interfaceAddr); i++ {
-		interfaceIP, _, _ := net.ParseCIDR(interfaceAddr[i].String())
-		if net.ParseIP(interfaceIP.String()) != nil {
-			localIPs = append(localIPs, interfaceIP)
-		} else {
-			return nil, fmt.Errorf("Error parsing self referencing address: %v", err)
-		}
-	}
-	return localIPs, nil
 }
 
 func setBaselineOptions(opts *Options) {
@@ -5108,6 +6104,10 @@ func setBaselineOptions(opts *Options) {
 					c.Mode = CompressionS2Auto
 				}
 			}
+			// Set default first info timeout value if not set.
+			if r.FirstInfoTimeout <= 0 {
+				r.FirstInfoTimeout = DEFAULT_LEAFNODE_INFO_WAIT
+			}
 		}
 	}
 
@@ -5176,6 +6176,15 @@ func setBaselineOptions(opts *Options) {
 	}
 	if opts.SyncInterval == 0 && !opts.syncSet {
 		opts.SyncInterval = defaultSyncInterval
+	}
+	if opts.JetStreamRequestQueueLimit <= 0 {
+		opts.JetStreamRequestQueueLimit = JSDefaultRequestQueueLimit
+	}
+	if opts.JetStreamInfoQueueLimit <= 0 {
+		opts.JetStreamInfoQueueLimit = opts.JetStreamRequestQueueLimit
+	}
+	if opts.JetStreamConcurrentIOs <= 0 {
+		opts.JetStreamConcurrentIOs = defaultConcurrentIOs
 	}
 }
 
@@ -5319,41 +6328,42 @@ func ConfigureOptions(fs *flag.FlagSet, args []string, printVersion, printHelp, 
 	fs.Visit(func(f *flag.Flag) {
 		switch f.Name {
 		case "DVV":
-			trackExplicitVal(FlagSnapshot, &FlagSnapshot.inCmdLine, "Debug", dbgAndTrcAndVerboseTrc)
-			trackExplicitVal(FlagSnapshot, &FlagSnapshot.inCmdLine, "Trace", dbgAndTrcAndVerboseTrc)
-			trackExplicitVal(FlagSnapshot, &FlagSnapshot.inCmdLine, "TraceVerbose", dbgAndTrcAndVerboseTrc)
+			trackExplicitVal(&FlagSnapshot.inCmdLine, "Debug", dbgAndTrcAndVerboseTrc)
+			trackExplicitVal(&FlagSnapshot.inCmdLine, "Trace", dbgAndTrcAndVerboseTrc)
+			trackExplicitVal(&FlagSnapshot.inCmdLine, "TraceVerbose", dbgAndTrcAndVerboseTrc)
 		case "DV":
-			trackExplicitVal(FlagSnapshot, &FlagSnapshot.inCmdLine, "Debug", dbgAndTrace)
-			trackExplicitVal(FlagSnapshot, &FlagSnapshot.inCmdLine, "Trace", dbgAndTrace)
+			trackExplicitVal(&FlagSnapshot.inCmdLine, "Debug", dbgAndTrace)
+			trackExplicitVal(&FlagSnapshot.inCmdLine, "Trace", dbgAndTrace)
 		case "D":
 			fallthrough
 		case "debug":
-			trackExplicitVal(FlagSnapshot, &FlagSnapshot.inCmdLine, "Debug", FlagSnapshot.Debug)
+			trackExplicitVal(&FlagSnapshot.inCmdLine, "Debug", FlagSnapshot.Debug)
 		case "VV":
-			trackExplicitVal(FlagSnapshot, &FlagSnapshot.inCmdLine, "Trace", trcAndVerboseTrc)
-			trackExplicitVal(FlagSnapshot, &FlagSnapshot.inCmdLine, "TraceVerbose", trcAndVerboseTrc)
+			trackExplicitVal(&FlagSnapshot.inCmdLine, "Trace", trcAndVerboseTrc)
+			trackExplicitVal(&FlagSnapshot.inCmdLine, "TraceVerbose", trcAndVerboseTrc)
 		case "V":
 			fallthrough
 		case "trace":
-			trackExplicitVal(FlagSnapshot, &FlagSnapshot.inCmdLine, "Trace", FlagSnapshot.Trace)
+			trackExplicitVal(&FlagSnapshot.inCmdLine, "Trace", FlagSnapshot.Trace)
 		case "T":
 			fallthrough
 		case "logtime":
-			trackExplicitVal(FlagSnapshot, &FlagSnapshot.inCmdLine, "Logtime", FlagSnapshot.Logtime)
+			trackExplicitVal(&FlagSnapshot.inCmdLine, "Logtime", FlagSnapshot.Logtime)
 		case "s":
 			fallthrough
 		case "syslog":
-			trackExplicitVal(FlagSnapshot, &FlagSnapshot.inCmdLine, "Syslog", FlagSnapshot.Syslog)
+			trackExplicitVal(&FlagSnapshot.inCmdLine, "Syslog", FlagSnapshot.Syslog)
 		case "no_advertise":
-			trackExplicitVal(FlagSnapshot, &FlagSnapshot.inCmdLine, "Cluster.NoAdvertise", FlagSnapshot.Cluster.NoAdvertise)
+			trackExplicitVal(&FlagSnapshot.inCmdLine, "Cluster.NoAdvertise", FlagSnapshot.Cluster.NoAdvertise)
+		case "js":
+			trackExplicitVal(&FlagSnapshot.inCmdLine, "JetStream", FlagSnapshot.JetStream)
 		}
 	})
 
 	// Process signal control.
 	if signal != _EMPTY_ {
-		if err := processSignal(signal); err != nil {
-			return nil, err
-		}
+		// processSignal always either returns an error or calls os.Exit(0).
+		return nil, processSignal(signal)
 	}
 
 	// Parse config if given
@@ -5603,4 +6613,61 @@ func expandPath(p string) (string, error) {
 	}
 
 	return filepath.Join(home, p[1:]), nil
+}
+
+// RedactArgs redacts sensitive arguments from the command line.
+// For example, turns '--pass=secret' into '--pass=[REDACTED]'.
+func RedactArgs(args []string) {
+	secretArg := regexp.MustCompile("^-{1,2}(user|pass|auth)(=.*)?$")
+	routeURLArg := regexp.MustCompile("^-{1,2}(routes)(=.*)?$")
+	singleURLArg := regexp.MustCompile("^-{1,2}(cluster|cluster_listen)(=.*)?$")
+	for i, arg := range args {
+		switch {
+		case secretArg.MatchString(arg):
+			redactArgValue(args, i, func(_ string) string { return "[REDACTED]" })
+		case routeURLArg.MatchString(arg):
+			redactArgValue(args, i, redactURLListUser)
+		case singleURLArg.MatchString(arg):
+			redactArgValue(args, i, redactURLUser)
+		}
+	}
+}
+
+func redactArgValue(args []string, i int, redact func(string) string) {
+	if flag, value, ok := strings.Cut(args[i], "="); ok {
+		args[i] = flag + "=" + redact(value)
+	} else if i+1 < len(args) {
+		args[i+1] = redact(args[i+1])
+	}
+}
+
+func redactURLUser(raw string) string {
+	if !strings.Contains(raw, "@") {
+		return raw
+	}
+	parseValue := strings.TrimSpace(raw)
+	restoreRandom := false
+	if prefix, ok := strings.CutSuffix(parseValue, ":-1"); ok {
+		parseValue = prefix + ":0"
+		restoreRandom = true
+	}
+	u, err := url.Parse(parseValue)
+	if err != nil || u.User == nil {
+		return raw
+	}
+	// url.String escapes brackets in userinfo, so use
+	// a placeholder here and rewrite it afterward.
+	u.User = url.User("_REDACTED_")
+	if restoreRandom {
+		u.Host = strings.TrimSuffix(u.Host, ":0") + ":-1"
+	}
+	return strings.Replace(u.String(), "_REDACTED_@", "[REDACTED]@", 1)
+}
+
+func redactURLListUser(raw string) string {
+	parts := strings.Split(raw, ",")
+	for i, part := range parts {
+		parts[i] = redactURLUser(part)
+	}
+	return strings.Join(parts, ",")
 }

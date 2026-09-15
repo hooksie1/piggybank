@@ -1,4 +1,4 @@
-// Copyright 2012-2024 The NATS Authors
+// Copyright 2012-2025 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -15,6 +15,7 @@ package server
 
 import (
 	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509/pkix"
 	"encoding/asn1"
@@ -24,6 +25,7 @@ import (
 	"net"
 	"net/url"
 	"regexp"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -54,15 +56,20 @@ type ClientAuthentication interface {
 	GetNonce() []byte
 	// Kind indicates what type of connection this is matching defined constants like CLIENT, ROUTER, GATEWAY, LEAF etc
 	Kind() int
+	//Gets the ID associated with a client
+	GetID() uint64
 }
 
 // NkeyUser is for multiple nkey based users
 type NkeyUser struct {
 	Nkey                   string              `json:"user"`
+	Issued                 int64               `json:"issued,omitempty"` // this is a copy of the issued at (iat) field in the jwt
 	Permissions            *Permissions        `json:"permissions,omitempty"`
 	Account                *Account            `json:"account,omitempty"`
 	SigningKey             string              `json:"signing_key,omitempty"`
 	AllowedConnectionTypes map[string]struct{} `json:"connection_types,omitempty"`
+	ProxyRequired          bool                `json:"proxy_required,omitempty"`
+	defaultPerms           bool
 }
 
 // User is for multiple accounts/users.
@@ -73,6 +80,7 @@ type User struct {
 	Account                *Account            `json:"account,omitempty"`
 	ConnectionDeadline     time.Time           `json:"connection_deadline,omitempty"`
 	AllowedConnectionTypes map[string]struct{} `json:"connection_types,omitempty"`
+	ProxyRequired          bool                `json:"proxy_required,omitempty"`
 }
 
 // clone performs a deep copy of the User struct, returning a new clone with
@@ -83,9 +91,10 @@ func (u *User) clone() *User {
 	}
 	clone := &User{}
 	*clone = *u
+	// Account is not cloned because it is always by reference to an existing struct.
 	clone.Permissions = u.Permissions.clone()
 
-	if len(u.AllowedConnectionTypes) > 0 {
+	if u.AllowedConnectionTypes != nil {
 		clone.AllowedConnectionTypes = make(map[string]struct{})
 		for k, v := range u.AllowedConnectionTypes {
 			clone.AllowedConnectionTypes[k] = v
@@ -103,7 +112,16 @@ func (n *NkeyUser) clone() *NkeyUser {
 	}
 	clone := &NkeyUser{}
 	*clone = *n
+	// Account is not cloned because it is always by reference to an existing struct.
 	clone.Permissions = n.Permissions.clone()
+
+	if n.AllowedConnectionTypes != nil {
+		clone.AllowedConnectionTypes = make(map[string]struct{})
+		for k, v := range n.AllowedConnectionTypes {
+			clone.AllowedConnectionTypes[k] = v
+		}
+	}
+
 	return clone
 }
 
@@ -176,6 +194,53 @@ func (p *Permissions) clone() *Permissions {
 	return clone
 }
 
+// wsCanMapCerts returns true if the websocket listener collects client
+// certificates, which mqtt and leafnode connections over it need to be mapped.
+func (o *Options) wsCanMapCerts() bool {
+	return o.Websocket.Port != 0 && o.Websocket.TLSConfig != nil &&
+		o.Websocket.TLSConfig.ClientAuth >= tls.RequestClientCert
+}
+
+// canTLSMap returns true if verify_and_map on any listener that uses the users
+// table could select this user, which makes it a certificate identity. Cluster
+// and gateway map onto their own configured user, so they do not count.
+func (o *Options) canTLSMap(u *User) bool {
+	// The mapping lookup skips users not allowed on the connection type.
+	allowed := func(cts ...string) bool {
+		if len(u.AllowedConnectionTypes) == 0 {
+			return true
+		}
+		for _, ct := range cts {
+			if _, ok := u.AllowedConnectionTypes[ct]; ok {
+				return true
+			}
+		}
+		return false
+	}
+	// Only a listener that is started can map, and in-process connections have
+	// no TLS state, so they never do.
+	if o.TLSMap && !o.DontListen && allowed(jwt.ConnectionTypeStandard) {
+		return true
+	}
+	if o.Websocket.TLSMap && o.Websocket.Port != 0 && allowed(jwt.ConnectionTypeWebsocket) {
+		return true
+	}
+	// Mqtt over websocket maps with the mqtt listener, not the websocket one,
+	// but takes its certificate from the websocket transport.
+	if o.MQTT.TLSMap && o.MQTT.Port != 0 &&
+		(allowed(jwt.ConnectionTypeMqtt) ||
+			o.wsCanMapCerts() && allowed(jwt.ConnectionTypeMqttWS)) {
+		return true
+	}
+	// Leafnodes only use the users table when the leafnode block sets no
+	// credentials of its own, see isLeafNodeAuthorized.
+	return o.LeafNode.TLSMap && o.LeafNode.Port != 0 &&
+		o.LeafNode.Username == _EMPTY_ && o.LeafNode.Nkey == _EMPTY_ &&
+		len(o.LeafNode.Users) == 0 &&
+		(allowed(jwt.ConnectionTypeLeafnode) ||
+			o.wsCanMapCerts() && allowed(jwt.ConnectionTypeLeafnodeWS))
+}
+
 // checkAuthforWarnings will look for insecure settings and log concerns.
 // Lock is assumed held.
 func (s *Server) checkAuthforWarnings() {
@@ -187,7 +252,7 @@ func (s *Server) checkAuthforWarnings() {
 	for _, u := range s.users {
 		// Skip warn if using TLS certs based auth
 		// unless a password has been left in the config.
-		if u.Password == _EMPTY_ && opts.TLSMap {
+		if u.Password == _EMPTY_ && opts.canTLSMap(u) {
 			continue
 		}
 		// Check if this is our internal sys client created on the fly.
@@ -405,6 +470,12 @@ func (c *client) matchesPinnedCert(tlsPinnedCerts PinnedCertSet) bool {
 	return true
 }
 
+var (
+	mustacheRE                             = regexp.MustCompile(`{{2}([^}]+)}{2}`)
+	maxPermTemplateSubjectExpansions       = 4096
+	errPermTemplateExpansionLimit    error = fmt.Errorf("template expansion exceeds limit")
+)
+
 func processUserPermissionsTemplate(lim jwt.UserPermissionLimits, ujwt *jwt.UserClaims, acc *Account) (jwt.UserPermissionLimits, error) {
 	nArrayCartesianProduct := func(a ...[]string) [][]string {
 		c := 1
@@ -436,16 +507,26 @@ func processUserPermissionsTemplate(lim jwt.UserPermissionLimits, ujwt *jwt.User
 		}
 		return p
 	}
+	isTag := func(op string) []string {
+		if len(op) >= 4 && strings.EqualFold("tag(", op[:4]) && strings.HasSuffix(op, ")") {
+			v := strings.TrimPrefix(op, "tag(")
+			v = strings.TrimSuffix(v, ")")
+			return []string{"tag", v}
+		} else if len(op) >= 12 && strings.EqualFold("account-tag(", op[:12]) && strings.HasSuffix(op, ")") {
+			v := strings.TrimPrefix(op, "account-tag(")
+			v = strings.TrimSuffix(v, ")")
+			return []string{"account-tag", v}
+		}
+		return nil
+	}
 	applyTemplate := func(list jwt.StringList, failOnBadSubject bool) (jwt.StringList, error) {
 		found := false
 	FOR_FIND:
 		for i := 0; i < len(list); i++ {
 			// check if templates are present
-			for _, tk := range strings.Split(list[i], tsep) {
-				if strings.HasPrefix(tk, "{{") && strings.HasSuffix(tk, "}}") {
-					found = true
-					break FOR_FIND
-				}
+			if mustacheRE.MatchString(list[i]) {
+				found = true
+				break FOR_FIND
 			}
 		}
 		if !found {
@@ -454,94 +535,92 @@ func processUserPermissionsTemplate(lim jwt.UserPermissionLimits, ujwt *jwt.User
 		// process the templates
 		emittedList := make([]string, 0, len(list))
 		for i := 0; i < len(list); i++ {
-			tokens := strings.Split(list[i], tsep)
-
-			newTokens := make([]string, len(tokens))
-			tagValues := [][]string{}
-
+			// find all the templates {{}} in this acl
+			tokens := mustacheRE.FindAllString(list[i], -1)
+			srcs := make([]string, len(tokens))
+			values := make([][]string, len(tokens))
+			hasTags := false
 			for tokenNum, tk := range tokens {
-				if strings.HasPrefix(tk, "{{") && strings.HasSuffix(tk, "}}") {
-					op := strings.ToLower(strings.TrimSuffix(strings.TrimPrefix(tk, "{{"), "}}"))
-					switch {
-					case op == "name()":
-						tk = ujwt.Name
-					case op == "subject()":
-						tk = ujwt.Subject
-					case op == "account-name()":
+				srcs[tokenNum] = tk
+				op := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(tk, "{{"), "}}"))
+				if strings.EqualFold("name()", op) {
+					values[tokenNum] = []string{ujwt.Name}
+				} else if strings.EqualFold("subject()", op) {
+					values[tokenNum] = []string{ujwt.Subject}
+				} else if strings.EqualFold("account-name()", op) {
+					acc.mu.RLock()
+					values[tokenNum] = []string{acc.nameTag}
+					acc.mu.RUnlock()
+				} else if strings.EqualFold("account-subject()", op) {
+					// this always has an issuer account since this is a scoped signer
+					values[tokenNum] = []string{ujwt.IssuerAccount}
+				} else if isTag(op) != nil {
+					hasTags = true
+					match := isTag(op)
+					var tags jwt.TagList
+					if match[0] == "account-tag" {
 						acc.mu.RLock()
-						name := acc.nameTag
+						tags = acc.tags
 						acc.mu.RUnlock()
-						tk = name
-					case op == "account-subject()":
-						tk = ujwt.IssuerAccount
-					case (strings.HasPrefix(op, "tag(") || strings.HasPrefix(op, "account-tag(")) &&
-						strings.HasSuffix(op, ")"):
-						// insert dummy tav value that will throw of subject validation (in case nothing is found)
-						tk = _EMPTY_
-						// collect list of matching tag values
-
-						var tags jwt.TagList
-						var tagPrefix string
-						if strings.HasPrefix(op, "account-tag(") {
-							acc.mu.RLock()
-							tags = acc.tags
-							acc.mu.RUnlock()
-							tagPrefix = fmt.Sprintf("%s:", strings.ToLower(
-								strings.TrimSuffix(strings.TrimPrefix(op, "account-tag("), ")")))
-						} else {
-							tags = ujwt.Tags
-							tagPrefix = fmt.Sprintf("%s:", strings.ToLower(
-								strings.TrimSuffix(strings.TrimPrefix(op, "tag("), ")")))
-						}
-
-						valueList := []string{}
-						for _, tag := range tags {
-							if strings.HasPrefix(tag, tagPrefix) {
-								tagValue := strings.TrimPrefix(tag, tagPrefix)
-								valueList = append(valueList, tagValue)
-							}
-						}
-						if len(valueList) != 0 {
-							tagValues = append(tagValues, valueList)
-						}
-					default:
-						// if macro is not recognized, throw off subject check on purpose
-						tk = " "
+					} else {
+						tags = ujwt.Tags
 					}
+					tagPrefix := fmt.Sprintf("%s:", strings.ToLower(match[1]))
+					var valueList []string
+					for _, tag := range tags {
+						if strings.HasPrefix(tag, tagPrefix) {
+							tagValue := strings.TrimPrefix(tag, tagPrefix)
+							valueList = append(valueList, tagValue)
+						}
+					}
+					if len(valueList) != 0 {
+						values[tokenNum] = valueList
+					} else if failOnBadSubject {
+						return nil, fmt.Errorf("generated invalid subject %q: %q is not defined", list[i], match[1])
+					} else {
+						// generate an invalid subject?
+						values[tokenNum] = []string{" "}
+					}
+				} else {
+					return nil, fmt.Errorf("template operation in %q: %q is not defined", list[i], op)
 				}
-				newTokens[tokenNum] = tk
 			}
-			// fill in tag value placeholders
-			if len(tagValues) == 0 {
-				emitSubj := strings.Join(newTokens, tsep)
-				if IsValidSubject(emitSubj) {
-					emittedList = append(emittedList, emitSubj)
+			if !hasTags {
+				subj := list[i]
+				for idx, m := range srcs {
+					subj = strings.Replace(subj, m, values[idx][0], -1)
+				}
+				if IsValidSubject(subj) {
+					emittedList = append(emittedList, subj)
 				} else if failOnBadSubject {
 					return nil, fmt.Errorf("generated invalid subject")
 				}
-				// else skip emitting
 			} else {
-				// compute the cartesian product and compute subject to emit for each combination
-				for _, valueList := range nArrayCartesianProduct(tagValues...) {
-					b := strings.Builder{}
-					for i, token := range newTokens {
-						if token == _EMPTY_ && len(valueList) > 0 {
-							b.WriteString(valueList[0])
-							valueList = valueList[1:]
-						} else {
-							b.WriteString(token)
-						}
-						if i != len(newTokens)-1 {
-							b.WriteString(tsep)
-						}
+				expCount := 1
+				for _, v := range values {
+					if len(v) == 0 {
+						expCount = 0
+						break
 					}
-					emitSubj := b.String()
-					if IsValidSubject(emitSubj) {
-						emittedList = append(emittedList, emitSubj)
+					if expCount > maxPermTemplateSubjectExpansions/len(v) {
+						return nil, fmt.Errorf("%w: %d", errPermTemplateExpansionLimit, maxPermTemplateSubjectExpansions)
+					}
+					expCount *= len(v)
+				}
+				if len(emittedList) > maxPermTemplateSubjectExpansions-expCount {
+					return nil, fmt.Errorf("%w: %d", errPermTemplateExpansionLimit, maxPermTemplateSubjectExpansions)
+				}
+				a := nArrayCartesianProduct(values...)
+				for _, aa := range a {
+					subj := list[i]
+					for j := 0; j < len(srcs); j++ {
+						subj = strings.Replace(subj, srcs[j], aa[j], -1)
+					}
+					if IsValidSubject(subj) {
+						emittedList = append(emittedList, subj)
 					} else if failOnBadSubject {
 						return nil, fmt.Errorf("generated invalid subject")
 					}
-					// else skip emitting
 				}
 			}
 		}
@@ -575,6 +654,7 @@ func processUserPermissionsTemplate(lim jwt.UserPermissionLimits, ujwt *jwt.User
 func (s *Server) processClientOrLeafAuthentication(c *client, opts *Options) (authorized bool) {
 	var (
 		nkey *NkeyUser
+		ujwt string
 		juc  *jwt.UserClaims
 		acc  *Account
 		user *User
@@ -583,10 +663,30 @@ func (s *Server) processClientOrLeafAuthentication(c *client, opts *Options) (au
 		ao   bool // auth override
 	)
 
+	// Little helper that will log the error as a debug statement, set the auth error in
+	// the connection and return false to indicate authentication failure.
+	setProxyAuthError := func(err error) bool {
+		c.Debugf(err.Error())
+		c.setAuthError(err)
+		return false
+	}
+
+	// Indicate if this connection came from a trusted proxy. Note that if
+	// trustedProxy could be false even if the connection is proxied, but it
+	// means that there was no trusted proxy configured.
+	trustedProxy, ok := s.proxyCheck(c, opts)
+	if trustedProxy && !ok {
+		return setProxyAuthError(ErrAuthProxyNotTrusted)
+	}
+
+	var proxyRequired bool
 	// Check if we have auth callouts enabled at the server level or in the bound account.
 	defer func() {
-		// Default reason
-		reason := AuthenticationViolation.String()
+		authErr := c.getAuthError()
+		if authErr == nil {
+			authErr = ErrAuthentication
+		}
+		reason := getAuthErrClosedState(authErr).String()
 		// No-op
 		if juc == nil && opts.AuthCallout == nil {
 			if !authorized {
@@ -594,12 +694,38 @@ func (s *Server) processClientOrLeafAuthentication(c *client, opts *Options) (au
 			}
 			return
 		}
-		// We have a juc defined here, check account.
+		// We have a juc, check if externally managed, i.e. should be delegated
+		// to the auth callout service.
 		if juc != nil && !acc.hasExternalAuth() {
 			if !authorized {
 				s.sendAccountAuthErrorEvent(c, c.acc, reason)
 			}
 			return
+		}
+		// Check config-mode. The global account is a condition since users that
+		// are not found in the config are implicitly bound to the global account.
+		// This means those users should be implicitly delegated to auth callout
+		// if configured. Exclude LEAF connections from this check.
+		if c.kind != LEAF && juc == nil && opts.AuthCallout != nil && c.acc.Name != globalAccountName {
+			// If no allowed accounts are defined, then all accounts are in scope.
+			// Otherwise see if the account is in the list.
+			delegated := len(opts.AuthCallout.AllowedAccounts) == 0
+			if !delegated {
+				for _, n := range opts.AuthCallout.AllowedAccounts {
+					if n == c.acc.Name {
+						delegated = true
+						break
+					}
+				}
+			}
+
+			// Not delegated, so return with previous authorized result.
+			if !delegated {
+				if !authorized {
+					s.sendAccountAuthErrorEvent(c, c.acc, reason)
+				}
+				return
+			}
 		}
 
 		// We have auth callout set here.
@@ -620,7 +746,7 @@ func (s *Server) processClientOrLeafAuthentication(c *client, opts *Options) (au
 		// If we are here we have an auth callout defined and we have failed auth so far
 		// so we will callout to our auth backend for processing.
 		if !skip {
-			authorized, reason = s.processClientOrLeafCallout(c, opts)
+			authorized, reason = s.processClientOrLeafCallout(c, opts, proxyRequired, trustedProxy, ujwt)
 		}
 		// Check if we are authorized and in the auth callout account, and if so add in deny publish permissions for the auth subject.
 		if authorized {
@@ -661,6 +787,11 @@ func (s *Server) processClientOrLeafAuthentication(c *client, opts *Options) (au
 	if !authRequired {
 		// TODO(dlc) - If they send us credentials should we fail?
 		s.mu.Unlock()
+		if c.kind == LEAF {
+			// Auth is not required, register the leaf node with the selected account.
+			// Otherwise, auth needs to match client auth.
+			return s.registerLeafWithAccount(c, opts.LeafNode.Account)
+		}
 		return true
 	}
 	var (
@@ -716,19 +847,49 @@ func (s *Server) processClientOrLeafAuthentication(c *client, opts *Options) (au
 		token = opts.Authorization
 	}
 
+	// MQTT can carry JWTs in the password field. Reconstruct it here for auth
+	// processing and auth callout, but do not populate c.opts.JWT yet or it would
+	// be exposed through monitoring and advisory paths even when the password is
+	// not actually a JWT.
+	if ujwt == _EMPTY_ && c.isMqtt() && c.opts.JWT == _EMPTY_ {
+		// Don't set juc here, leave that to the next s.trustedKeys != nil block,
+		// so that we don't try to trust a JWT when we aren't in operator mode. We
+		// will allow it to be passed through auth callout though.
+		if _, err := jwt.DecodeUserClaims(c.opts.Password); err == nil {
+			ujwt = c.opts.Password
+		}
+	}
+
 	// Check if we have trustedKeys defined in the server. If so we require a user jwt.
 	if s.trustedKeys != nil {
-		if c.opts.JWT == _EMPTY_ {
+		if ujwt == _EMPTY_ {
+			// Need to be sure that it's a NATS JWT, otherwise we will not correctly
+			// attempt the default sentinel below.
+			if _, err = jwt.DecodeUserClaims(c.opts.JWT); err == nil {
+				ujwt = c.opts.JWT
+			}
+		}
+		if ujwt == _EMPTY_ {
+			// Didn't fall through with a valid NATS JWT, so try the default sentinel
+			// if configured.
+			if opts.DefaultSentinel != _EMPTY_ {
+				c.opts.JWT = opts.DefaultSentinel
+				ujwt = c.opts.JWT
+			}
+		}
+		if ujwt == _EMPTY_ {
 			s.mu.Unlock()
 			c.Debugf("Authentication requires a user JWT")
 			return false
 		}
-		// So we have a valid user jwt here.
-		juc, err = jwt.DecodeUserClaims(c.opts.JWT)
-		if err != nil {
+		if juc, err = jwt.DecodeUserClaims(ujwt); err != nil {
 			s.mu.Unlock()
 			c.Debugf("User JWT not valid: %v", err)
 			return false
+		}
+		if proxyRequired = juc.ProxyRequired; proxyRequired && !trustedProxy {
+			s.mu.Unlock()
+			return setProxyAuthError(ErrAuthProxyRequired)
 		}
 		vr := jwt.CreateValidationResults()
 		juc.Validate(vr)
@@ -845,6 +1006,54 @@ func (s *Server) processClientOrLeafAuthentication(c *client, opts *Options) (au
 	// If we have a jwt and a userClaim, make sure we have the Account, etc associated.
 	// We need to look up the account. This will use an account resolver if one is present.
 	if juc != nil {
+		issuer := juc.Issuer
+		if juc.IssuerAccount != _EMPTY_ {
+			issuer = juc.IssuerAccount
+		}
+		if pinnedAcounts != nil {
+			if _, ok := pinnedAcounts[issuer]; !ok {
+				c.Debugf("Account %s not listed as operator pinned account", issuer)
+				atomic.AddUint64(&s.pinnedAccFail, 1)
+				return false
+			}
+		}
+		if acc, err = s.LookupAccount(issuer); acc == nil {
+			c.Debugf("Account JWT lookup error: %v", err)
+			return false
+		}
+		acc.mu.RLock()
+		aissuer := acc.Issuer
+		acc.mu.RUnlock()
+		if !s.isTrustedIssuer(aissuer) {
+			c.Debugf("Account JWT not signed by trusted operator")
+			return false
+		}
+		if scope, ok := acc.hasIssuer(juc.Issuer); !ok {
+			c.Debugf("User JWT issuer is not known")
+			return false
+		} else if scope != nil {
+			if err := scope.ValidateScopedSigner(juc); err != nil {
+				c.Debugf("User JWT is not valid: %v", err)
+				return false
+			} else if uSc, ok := scope.(*jwt.UserScope); !ok {
+				c.Debugf("User JWT is not valid")
+				return false
+			} else if juc.UserPermissionLimits, err = processUserPermissionsTemplate(uSc.Template, juc, acc); err != nil {
+				c.Debugf("User JWT generated invalid permissions")
+				return false
+			}
+		}
+		if acc.IsExpired() {
+			c.Debugf("Account JWT has expired")
+			return false
+		}
+		if juc.BearerToken && acc.failBearer() {
+			c.Debugf("Account does not allow bearer tokens")
+			return false
+		}
+		// We check the allowed connection types, but only after processing
+		// of scoped signer (so that it updates `juc` with what is defined
+		// in the account.
 		allowedConnTypes, err := convertAllowedConnectionTypes(juc.AllowedConnectionTypes)
 		if err != nil {
 			// We got an error, which means some connection types were unknown. As long as
@@ -872,50 +1081,10 @@ func (s *Server) processClientOrLeafAuthentication(c *client, opts *Options) (au
 			c.Debugf("Connection type not allowed")
 			return false
 		}
-		issuer := juc.Issuer
-		if juc.IssuerAccount != _EMPTY_ {
-			issuer = juc.IssuerAccount
-		}
-		if pinnedAcounts != nil {
-			if _, ok := pinnedAcounts[issuer]; !ok {
-				c.Debugf("Account %s not listed as operator pinned account", issuer)
-				atomic.AddUint64(&s.pinnedAccFail, 1)
-				return false
-			}
-		}
-		if acc, err = s.LookupAccount(issuer); acc == nil {
-			c.Debugf("Account JWT lookup error: %v", err)
-			return false
-		}
-		if !s.isTrustedIssuer(acc.Issuer) {
-			c.Debugf("Account JWT not signed by trusted operator")
-			return false
-		}
-		if scope, ok := acc.hasIssuer(juc.Issuer); !ok {
-			c.Debugf("User JWT issuer is not known")
-			return false
-		} else if scope != nil {
-			if err := scope.ValidateScopedSigner(juc); err != nil {
-				c.Debugf("User JWT is not valid: %v", err)
-				return false
-			} else if uSc, ok := scope.(*jwt.UserScope); !ok {
-				c.Debugf("User JWT is not valid")
-				return false
-			} else if juc.UserPermissionLimits, err = processUserPermissionsTemplate(uSc.Template, juc, acc); err != nil {
-				c.Debugf("User JWT generated invalid permissions")
-				return false
-			}
-		}
-		if acc.IsExpired() {
-			c.Debugf("Account JWT has expired")
-			return false
-		}
-		if juc.BearerToken && acc.failBearer() {
-			c.Debugf("Account does not allow bearer tokens")
-			return false
-		}
-		// skip validation of nonce when presented with a bearer token
-		// FIXME: if BearerToken is only for WSS, need check for server with that port enabled
+		// Skip validation of nonce when presented with a bearer token.
+		// While support for bearer tokens was added for WebSockets, there is no
+		// security benefit in restricting their use to that client protocol: the
+		// client can just go use the other protocol.
 		if !juc.BearerToken {
 			// Verify the signature against the nonce.
 			if c.opts.Sig == _EMPTY_ {
@@ -966,24 +1135,29 @@ func (s *Server) processClientOrLeafAuthentication(c *client, opts *Options) (au
 			deniedSub := []string{}
 			for _, sub := range denyAllJs {
 				if c.perms.pub.deny != nil {
-					if r := c.perms.pub.deny.Match(sub); len(r.psubs)+len(r.qsubs) > 0 {
+					if c.perms.pub.deny.HasInterest(sub) {
 						deniedPub = append(deniedPub, sub)
 					}
 				}
 				if c.perms.sub.deny != nil {
-					if r := c.perms.sub.deny.Match(sub); len(r.psubs)+len(r.qsubs) > 0 {
+					if c.perms.sub.deny.HasInterest(sub) {
 						deniedSub = append(deniedSub, sub)
 					}
 				}
 			}
 			if len(deniedPub) > 0 || len(deniedSub) > 0 {
-				c.Noticef("Connected %s has JetStream denied on pub: %v sub: %v", c.kindString(), deniedPub, deniedSub)
+				c.Debugf("Connected %s has JetStream denied on pub: %v sub: %v", c.kindString(), deniedPub, deniedSub)
 			}
 		}
 
 		// Hold onto the user's public key.
 		c.mu.Lock()
 		c.pubKey = juc.Subject
+		// If this is a MQTT client, we purposefully didn't populate the JWT as it could contain
+		// a password or token. Now we know it's a valid JWT, we can populate it.
+		if c.isMqtt() {
+			c.opts.JWT = ujwt
+		}
 		c.tags = juc.Tags
 		c.nameTag = juc.Name
 		c.mu.Unlock()
@@ -1000,6 +1174,9 @@ func (s *Server) processClientOrLeafAuthentication(c *client, opts *Options) (au
 	}
 
 	if nkey != nil {
+		if proxyRequired = nkey.ProxyRequired; proxyRequired && !trustedProxy {
+			return setProxyAuthError(ErrAuthProxyRequired)
+		}
 		// If we did not match noAuthUser check signature which is required.
 		if nkey.Nkey != noAuthUser {
 			if c.opts.Sig == _EMPTY_ {
@@ -1031,6 +1208,16 @@ func (s *Server) processClientOrLeafAuthentication(c *client, opts *Options) (au
 		return true
 	}
 	if user != nil {
+		if proxyRequired = user.ProxyRequired; proxyRequired && !trustedProxy {
+			return setProxyAuthError(ErrAuthProxyRequired)
+		}
+		// A user with no password is a certificate only identity when mapping is
+		// enabled on another listener, so do not let comparePasswords match two
+		// empty passwords. The no_auth_user needs no credentials either way.
+		if !tlsMap && user.Password == _EMPTY_ && user.Username != noAuthUser && opts.canTLSMap(user) {
+			c.Debugf("User %q requires a client certificate", user.Username)
+			return false
+		}
 		ok = comparePasswords(user.Password, c.opts.Password)
 		// If we are authorized, register the user which will properly setup any permissions
 		// for pub/sub authorizations.
@@ -1040,7 +1227,11 @@ func (s *Server) processClientOrLeafAuthentication(c *client, opts *Options) (au
 		return ok
 	}
 
-	if c.kind == CLIENT {
+	// Check for the use of simple auth.
+	if c.kind == CLIENT || c.kind == LEAF {
+		if proxyRequired = opts.ProxyRequired; proxyRequired && !trustedProxy {
+			return setProxyAuthError(ErrAuthProxyRequired)
+		}
 		if token != _EMPTY_ {
 			return comparePasswords(token, c.opts.Token)
 		} else if username != _EMPTY_ {
@@ -1049,14 +1240,70 @@ func (s *Server) processClientOrLeafAuthentication(c *client, opts *Options) (au
 			}
 			return comparePasswords(password, c.opts.Password)
 		}
-	} else if c.kind == LEAF {
-		// There is no required username/password to connect and
-		// there was no u/p in the CONNECT or none that matches the
-		// know users. Register the leaf connection with global account
-		// or the one specified in config (if provided).
-		return s.registerLeafWithAccount(c, opts.LeafNode.Account)
 	}
 	return false
+}
+
+// If there are configured trusted proxies and this connection comes
+// from a proxy whose signature can be verified by one of the known
+// trusted key, this function will return `true, true`. If the signature
+// cannot be verified by any, it will return `true, false`.
+// If the connection is not proxied, or there are no configured trusted
+// proxies, then this function returns `false, false`.
+//
+// Server lock MUST NOT be held on entry since this function will grab
+// the read lock to extract the list of proxy trusted keys. The signature
+// verification process will be done outside of the lock.
+func (s *Server) proxyCheck(c *client, opts *Options) (bool, bool) {
+	// If there is no signature or no configured trusted proxy, return false.
+	psig := c.opts.ProxySig
+	if psig == _EMPTY_ || opts.Proxies == nil || len(opts.Proxies.Trusted) == 0 {
+		return false, false
+	}
+	// Decode the signature.
+	sig, err := base64.RawURLEncoding.DecodeString(psig)
+	if err != nil {
+		c.Debugf("Proxy signature not valid base64")
+		return true, false
+	}
+	// Go through the trusted keys and verify the signature.
+	s.mu.RLock()
+	keys := slices.Clone(s.proxiesKeyPairs)
+	s.mu.RUnlock()
+	for _, kp := range keys {
+		// We stop at the first that is valid.
+		if err := kp.Verify(c.nonce, sig); err == nil {
+			pub, _ := kp.PublicKey()
+			// Need to hold both locks so the proxiedConns is only
+			// registered while the client isn't closed.
+			s.mu.Lock()
+			c.mu.Lock()
+			if c.isClosed() {
+				c.mu.Unlock()
+				s.mu.Unlock()
+				return true, true
+			}
+			// Track which proxy public key is used by this connection.
+			c.proxyKey = pub
+			cid := c.cid
+			c.mu.Unlock()
+			// Track this proxied connection so that it can be closed
+			// if the trusted key is removed on configuration reload
+			if s.proxiedConns == nil {
+				s.proxiedConns = make(map[string]map[uint64]*client)
+			}
+			clients := s.proxiedConns[pub]
+			if clients == nil {
+				clients = make(map[uint64]*client)
+			}
+			clients[cid] = c
+			s.proxiedConns[pub] = clients
+			s.mu.Unlock()
+			return true, true
+		}
+	}
+	// We could not verify the signature, so indicate failure.
+	return true, false
 }
 
 func getTLSAuthDCs(rdns *pkix.RDNSequence) string {
@@ -1100,7 +1347,7 @@ func checkClientTLSCertSubject(c *client, fn tlsMapAuthFn) bool {
 	hasEmailAddresses := len(cert.EmailAddresses) > 0
 	hasSubject := len(cert.Subject.String()) > 0
 	hasURIs := len(cert.URIs) > 0
-	if !hasEmailAddresses && !hasSubject && !hasURIs {
+	if !hasSANs && !hasEmailAddresses && !hasSubject && !hasURIs {
 		c.Debugf("User required in cert, none found")
 		return false
 	}
@@ -1307,7 +1554,25 @@ func (s *Server) registerLeafWithAccount(c *client, account string) bool {
 func (s *Server) isLeafNodeAuthorized(c *client) bool {
 	opts := s.getOpts()
 
-	isAuthorized := func(username, password, account string) bool {
+	setProxyAuthError := func(err error) bool {
+		c.Debugf(err.Error())
+		c.setAuthError(err)
+		return false
+	}
+
+	isAuthorized := func(username, password, account string, proxyRequired bool) bool {
+		trustedProxy, ok := s.proxyCheck(c, opts)
+		if trustedProxy && !ok {
+			return setProxyAuthError(ErrAuthProxyNotTrusted)
+		}
+		// A given user may not be required, but if the boolean is set at the
+		// authorization top-level, then override.
+		if !proxyRequired && opts.LeafNode.ProxyRequired {
+			proxyRequired = true
+		}
+		if proxyRequired && !trustedProxy {
+			return setProxyAuthError(ErrAuthProxyRequired)
+		}
 		if username != c.opts.Username {
 			return false
 		}
@@ -1321,8 +1586,16 @@ func (s *Server) isLeafNodeAuthorized(c *client) bool {
 	// The user in CONNECT must match. We will bind to the account associated
 	// with that user (from the leafnode's authorization{} config).
 	if opts.LeafNode.Username != _EMPTY_ {
-		return isAuthorized(opts.LeafNode.Username, opts.LeafNode.Password, opts.LeafNode.Account)
+		return isAuthorized(opts.LeafNode.Username, opts.LeafNode.Password, opts.LeafNode.Account,
+			opts.LeafNode.ProxyRequired)
 	} else if opts.LeafNode.Nkey != _EMPTY_ {
+		trustedProxy, ok := s.proxyCheck(c, opts)
+		if trustedProxy && !ok {
+			return false
+		}
+		if opts.LeafNode.ProxyRequired && !trustedProxy {
+			return setProxyAuthError(ErrAuthProxyRequired)
+		}
 		if c.opts.Nkey != opts.LeafNode.Nkey {
 			return false
 		}
@@ -1376,7 +1649,7 @@ func (s *Server) isLeafNodeAuthorized(c *client) bool {
 			}
 			// This will authorize since are using an existing user,
 			// but it will also register with proper account.
-			return isAuthorized(user.Username, user.Password, accName)
+			return isAuthorized(user.Username, user.Password, accName, user.ProxyRequired)
 		}
 
 		// This is expected to be a very small array.
@@ -1386,7 +1659,7 @@ func (s *Server) isLeafNodeAuthorized(c *client) bool {
 				if u.Account != nil {
 					accName = u.Account.Name
 				}
-				return isAuthorized(u.Username, u.Password, accName)
+				return isAuthorized(u.Username, u.Password, accName, u.ProxyRequired)
 			}
 		}
 		return false
@@ -1418,8 +1691,14 @@ func comparePasswords(serverPassword, clientPassword string) bool {
 		if err := bcrypt.CompareHashAndPassword([]byte(serverPassword), []byte(clientPassword)); err != nil {
 			return false
 		}
-	} else if serverPassword != clientPassword {
-		return false
+	} else {
+		// stringToBytes should be constant-time near enough compared to
+		// turning a string into []byte normally.
+		spass := stringToBytes(serverPassword)
+		cpass := stringToBytes(clientPassword)
+		if subtle.ConstantTimeCompare(spass, cpass) == 0 {
+			return false
+		}
 	}
 	return true
 }
@@ -1432,13 +1711,42 @@ func validateAuth(o *Options) error {
 		if err := validateAllowedConnectionTypes(u.AllowedConnectionTypes); err != nil {
 			return err
 		}
+		if err := validatePermissionSubjects(u.Permissions); err != nil {
+			return fmt.Errorf("invalid permissions for user %q: %w", u.Username, err)
+		}
 	}
 	for _, u := range o.Nkeys {
 		if err := validateAllowedConnectionTypes(u.AllowedConnectionTypes); err != nil {
 			return err
 		}
+		if err := validatePermissionSubjects(u.Permissions); err != nil {
+			return fmt.Errorf("invalid permissions for nkey %q: %w", u.Nkey, err)
+		}
 	}
 	return validateNoAuthUser(o, o.NoAuthUser)
+}
+
+func validatePermissionSubjects(p *Permissions) error {
+	if p == nil {
+		return nil
+	}
+	if p.Publish != nil {
+		if err := checkPermSubjectArray(p.Publish.Allow, false); err != nil {
+			return fmt.Errorf("publish allow: %w", err)
+		}
+		if err := checkPermSubjectArray(p.Publish.Deny, false); err != nil {
+			return fmt.Errorf("publish deny: %w", err)
+		}
+	}
+	if p.Subscribe != nil {
+		if err := checkPermSubjectArray(p.Subscribe.Allow, true); err != nil {
+			return fmt.Errorf("subscribe allow: %w", err)
+		}
+		if err := checkPermSubjectArray(p.Subscribe.Deny, true); err != nil {
+			return fmt.Errorf("subscribe deny: %w", err)
+		}
+	}
+	return nil
 }
 
 func validateAllowedConnectionTypes(m map[string]struct{}) error {
@@ -1447,7 +1755,8 @@ func validateAllowedConnectionTypes(m map[string]struct{}) error {
 		switch ctuc {
 		case jwt.ConnectionTypeStandard, jwt.ConnectionTypeWebsocket,
 			jwt.ConnectionTypeLeafnode, jwt.ConnectionTypeLeafnodeWS,
-			jwt.ConnectionTypeMqtt, jwt.ConnectionTypeMqttWS:
+			jwt.ConnectionTypeMqtt, jwt.ConnectionTypeMqttWS,
+			jwt.ConnectionTypeInProcess:
 		default:
 			return fmt.Errorf("unknown connection type %q", ct)
 		}
@@ -1483,4 +1792,46 @@ func validateNoAuthUser(o *Options, noAuthUser string) error {
 	return fmt.Errorf(
 		`no_auth_user: "%s" not present as user or nkey in authorization block or account configuration`,
 		noAuthUser)
+}
+
+func validateProxies(o *Options) error {
+	if o.Proxies == nil {
+		return nil
+	}
+	for _, p := range o.Proxies.Trusted {
+		if !nkeys.IsValidPublicKey(p.Key) {
+			return fmt.Errorf("proxy trusted key %q is invalid", p.Key)
+		}
+	}
+	return nil
+}
+
+// Create a list of nkeys.KeyPair corresponding to the public keys
+// of the Proxies.TrustedKeys list.
+// Server lock must be held on entry.
+func (s *Server) processProxiesTrustedKeys() {
+	// We could be here on reload.
+	if s.proxiesKeyPairs != nil {
+		s.proxiesKeyPairs = s.proxiesKeyPairs[:0]
+	}
+	if opts := s.getOpts(); opts.Proxies == nil {
+		return
+	}
+	for _, p := range s.getOpts().Proxies.Trusted {
+		// Can't fail since we have already checked that it was a valid key.
+		kp, _ := nkeys.FromPublicKey(p.Key)
+		s.proxiesKeyPairs = append(s.proxiesKeyPairs, kp)
+	}
+}
+
+// Returns the connection's `ClosedState` for the given authenication error.
+func getAuthErrClosedState(authErr error) ClosedState {
+	switch authErr {
+	case ErrAuthProxyNotTrusted:
+		return ProxyNotTrusted
+	case ErrAuthProxyRequired:
+		return ProxyRequired
+	default:
+		return AuthenticationViolation
+	}
 }

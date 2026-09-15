@@ -1,4 +1,4 @@
-// Copyright 2012-2021 The NATS Authors
+// Copyright 2012-2025 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -30,6 +30,14 @@ var (
 
 	// ErrAuthExpired represents an expired authorization due to timeout.
 	ErrAuthExpired = errors.New("authentication expired")
+
+	// ErrAuthProxyNotTrusted represents an error condition on failed authentication
+	// due to a connection from a proxy not in the list of trusted proxies.
+	ErrAuthProxyNotTrusted = errors.New("proxy is not trusted")
+
+	// ErrAuthProxyRequired represents an error condition on failed authentication
+	// due to a connection not coming from a proxy.
+	ErrAuthProxyRequired = errors.New("proxy connection required")
 
 	// ErrMaxPayload represents an error condition when the payload is too big.
 	ErrMaxPayload = errors.New("maximum payload exceeded")
@@ -153,6 +161,9 @@ var (
 	// Gateway's name.
 	ErrWrongGateway = errors.New("wrong gateway")
 
+	// ErrGatewayNameHasSpaces signals that the gateway name contains spaces, which is not allowed.
+	ErrGatewayNameHasSpaces = errors.New("gateway name cannot contain spaces")
+
 	// ErrNoSysAccount is returned when an attempt to publish or subscribe is made
 	// when there is no internal system account defined.
 	ErrNoSysAccount = errors.New("system account not setup")
@@ -162,6 +173,9 @@ var (
 
 	// ErrServerNotRunning is used to signal an error that a server is not running.
 	ErrServerNotRunning = errors.New("server is not running")
+
+	// ErrServerNameHasSpaces signals that the server name contains spaces, which is not allowed.
+	ErrServerNameHasSpaces = errors.New("server name cannot contain spaces")
 
 	// ErrBadMsgHeader signals the parser detected a bad message header
 	ErrBadMsgHeader = errors.New("bad message header detected")
@@ -179,6 +193,9 @@ var (
 
 	// ErrClusterNameRemoteConflict signals that a remote server has a different cluster name.
 	ErrClusterNameRemoteConflict = errors.New("cluster name from remote server conflicts")
+
+	// ErrClusterNameHasSpaces signals that the cluster name contains spaces, which is not allowed.
+	ErrClusterNameHasSpaces = errors.New("cluster name cannot contain spaces")
 
 	// ErrMalformedSubject is returned when a subscription is made with a subject that does not conform to subject rules.
 	ErrMalformedSubject = errors.New("malformed subject")
@@ -198,12 +215,15 @@ var (
 
 	// ErrMinimumVersionRequired is returned when a connection is not at the minimum version required.
 	ErrMinimumVersionRequired = errors.New("minimum version required")
+	// ErrLeafNodeMinVersionRejected is the leafnode protocol error prefix used
+	// when rejecting a remote due to leafnodes.min_version.
+	ErrLeafNodeMinVersionRejected = errors.New("connection rejected since minimum version required is")
 
 	// ErrInvalidMappingDestination is used for all subject mapping destination errors
 	ErrInvalidMappingDestination = errors.New("invalid mapping destination")
 
 	// ErrInvalidMappingDestinationSubject is used to error on a bad transform destination mapping
-	ErrInvalidMappingDestinationSubject = fmt.Errorf("%w: invalid subject", ErrInvalidMappingDestination)
+	ErrInvalidMappingDestinationSubject = fmt.Errorf("%w: invalid transform", ErrInvalidMappingDestination)
 
 	// ErrMappingDestinationNotUsingAllWildcards is used to error on a transform destination not using all of the token wildcards
 	ErrMappingDestinationNotUsingAllWildcards = fmt.Errorf("%w: not using all of the token wildcard(s)", ErrInvalidMappingDestination)
@@ -234,6 +254,9 @@ type mappingDestinationErr struct {
 }
 
 func (e *mappingDestinationErr) Error() string {
+	if e.token == _EMPTY_ {
+		return e.err.Error()
+	}
 	return fmt.Sprintf("%s in %s", e.err, e.token)
 }
 
@@ -318,7 +341,7 @@ type errCtx struct {
 	ctx string
 }
 
-func NewErrorCtx(err error, format string, args ...interface{}) error {
+func NewErrorCtx(err error, format string, args ...any) error {
 	return &errCtx{err, fmt.Sprintf(format, args...)}
 }
 
