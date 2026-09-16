@@ -1,4 +1,4 @@
-// Copyright 2012-2023 The NATS Authors
+// Copyright 2012-2025 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -14,6 +14,8 @@
 package server
 
 import (
+	"regexp"
+	"runtime/debug"
 	"time"
 )
 
@@ -33,15 +35,38 @@ const (
 )
 
 var (
-	// gitCommit injected at build
-	gitCommit string
+	// gitCommit and serverVersion injected at build.
+	gitCommit, serverVersion string
 	// trustedKeys is a whitespace separated array of trusted operator's public nkeys.
 	trustedKeys string
+	// SemVer regexp to validate the VERSION.
+	semVerRe = regexp.MustCompile(`^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$`)
 )
+
+// formatRevision formats a VCS revision string for display.
+func formatRevision(revision string) string {
+	if len(revision) >= 7 {
+		return revision[:7]
+	}
+	return revision
+}
+
+func init() {
+	// Use build info if present, it would be if building using 'go build .'
+	// or when using a release.
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, setting := range info.Settings {
+			switch setting.Key {
+			case "vcs.revision":
+				gitCommit = formatRevision(setting.Value)
+			}
+		}
+	}
+}
 
 const (
 	// VERSION is the current version for the server.
-	VERSION = "2.10.12"
+	VERSION = "2.14.6"
 
 	// PROTO is the currently supported protocol.
 	// 0 was the original
@@ -121,7 +146,10 @@ const (
 	// DEFAULT_ROUTE_CONNECT Route solicitation intervals.
 	DEFAULT_ROUTE_CONNECT = 1 * time.Second
 
-	// DEFAULT_ROUTE_RECONNECT Route reconnect intervals.
+	// DEFAULT_ROUTE_CONNECT_MAX Route solicitation intervals (max).
+	DEFAULT_ROUTE_CONNECT_MAX = 30 * time.Second
+
+	// DEFAULT_ROUTE_RECONNECT Route reconnect delay.
 	DEFAULT_ROUTE_RECONNECT = 1 * time.Second
 
 	// DEFAULT_ROUTE_DIAL Route dial timeout.
@@ -156,6 +184,9 @@ const (
 
 	// MAX_HPUB_ARGS Maximum possible number of arguments from HPUB proto.
 	MAX_HPUB_ARGS = 4
+
+	// MAX_RSUB_ARGS Maximum possible number of arguments from a RS+/LS+ proto.
+	MAX_RSUB_ARGS = 6
 
 	// DEFAULT_MAX_CLOSED_CLIENTS is the maximum number of closed connections we hold onto.
 	DEFAULT_MAX_CLOSED_CLIENTS = 10000

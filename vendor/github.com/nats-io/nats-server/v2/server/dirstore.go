@@ -1,4 +1,4 @@
-// Copyright 2012-2021 The NATS Authors
+// Copyright 2012-2025 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -48,8 +48,11 @@ func validatePathExists(path string, dir bool) (string, error) {
 	}
 
 	var finfo os.FileInfo
-	if finfo, err = os.Stat(abs); os.IsNotExist(err) {
-		return _EMPTY_, fmt.Errorf("the path [%s] doesn't exist", abs)
+	if finfo, err = os.Stat(abs); err != nil {
+		if os.IsNotExist(err) {
+			return _EMPTY_, fmt.Errorf("the path [%s] doesn't exist", abs)
+		}
+		return _EMPTY_, fmt.Errorf("error accessing path [%s]: %v", abs, err)
 	}
 
 	mode := finfo.Mode()
@@ -103,7 +106,7 @@ func newDir(dirPath string, create bool) (string, error) {
 }
 
 // future proofing in case new options will be added
-type dirJWTStoreOption interface{}
+type dirJWTStoreOption any
 
 // Creates a directory based jwt store.
 // Reads files only, does NOT watch directories and files.
@@ -230,7 +233,7 @@ func (store *DirJWTStore) Pack(maxJWTs int) (string, error) {
 	}
 	store.Lock()
 	err := filepath.Walk(store.directory, func(path string, info os.FileInfo, err error) error {
-		if !info.IsDir() && strings.HasSuffix(path, fileExtension) { // this is a JWT
+		if info != nil && !info.IsDir() && strings.HasSuffix(path, fileExtension) { // this is a JWT
 			if count == maxJWTs { // won't match negative
 				return nil
 			}
@@ -598,7 +601,7 @@ func (q *expirationTracker) Swap(i, j int) {
 	pq[j].index = j
 }
 
-func (q *expirationTracker) Push(x interface{}) {
+func (q *expirationTracker) Push(x any) {
 	n := len(q.heap)
 	item := x.(*jwtItem)
 	item.index = n
@@ -606,7 +609,7 @@ func (q *expirationTracker) Push(x interface{}) {
 	q.idx[item.publicKey] = q.lru.PushBack(item)
 }
 
-func (q *expirationTracker) Pop() interface{} {
+func (q *expirationTracker) Pop() any {
 	old := q.heap
 	n := len(old)
 	item := old[n-1]

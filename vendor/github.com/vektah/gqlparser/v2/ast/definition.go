@@ -1,5 +1,7 @@
 package ast
 
+import "slices"
+
 type DefinitionKind string
 
 const (
@@ -29,8 +31,14 @@ type Definition struct {
 	Types       []string      // union
 	EnumValues  EnumValueList // enum
 
-	Position *Position `dump:"-"`
-	BuiltIn  bool      `dump:"-"`
+	Position *Position `dump:"-" json:"-"`
+	// TypePositions holds the source position of each Types entry (a union's
+	// member types), parallel to Types. The parser populates it so that
+	// validation can point at the offending member; when populated its length
+	// equals len(Types). It is empty for definitions built programmatically, in
+	// which case validators fall back to the definition's own Position.
+	TypePositions []*Position `dump:"-" json:"-"`
+	BuiltIn       bool        `dump:"-"`
 
 	BeforeDescriptionComment *CommentGroup
 	AfterDescriptionComment  *CommentGroup
@@ -54,12 +62,7 @@ func (d *Definition) IsInputType() bool {
 }
 
 func (d *Definition) OneOf(types ...string) bool {
-	for _, t := range types {
-		if d.Name == t {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(types, d.Name)
 }
 
 type FieldDefinition struct {
@@ -69,7 +72,7 @@ type FieldDefinition struct {
 	DefaultValue *Value                 // only for input objects
 	Type         *Type
 	Directives   DirectiveList
-	Position     *Position `dump:"-"`
+	Position     *Position `dump:"-" json:"-"`
 
 	BeforeDescriptionComment *CommentGroup
 	AfterDescriptionComment  *CommentGroup
@@ -81,7 +84,7 @@ type ArgumentDefinition struct {
 	DefaultValue *Value
 	Type         *Type
 	Directives   DirectiveList
-	Position     *Position `dump:"-"`
+	Position     *Position `dump:"-" json:"-"`
 
 	BeforeDescriptionComment *CommentGroup
 	AfterDescriptionComment  *CommentGroup
@@ -91,7 +94,7 @@ type EnumValueDefinition struct {
 	Description string
 	Name        string
 	Directives  DirectiveList
-	Position    *Position `dump:"-"`
+	Position    *Position `dump:"-" json:"-"`
 
 	BeforeDescriptionComment *CommentGroup
 	AfterDescriptionComment  *CommentGroup
@@ -103,7 +106,7 @@ type DirectiveDefinition struct {
 	Arguments    ArgumentDefinitionList
 	Locations    []DirectiveLocation
 	IsRepeatable bool
-	Position     *Position `dump:"-"`
+	Position     *Position `dump:"-" json:"-"`
 
 	BeforeDescriptionComment *CommentGroup
 	AfterDescriptionComment  *CommentGroup

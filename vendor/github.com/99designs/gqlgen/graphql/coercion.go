@@ -5,52 +5,42 @@ import (
 )
 
 // CoerceList applies coercion from a single value to a list.
-func CoerceList(v interface{}) []interface{} {
-	var vSlice []interface{}
-	if v != nil {
-		switch v := v.(type) {
-		case []interface{}:
-			// already a slice no coercion required
-			vSlice = v
-		case []string:
-			if len(v) > 0 {
-				vSlice = []interface{}{v[0]}
-			}
-		case []json.Number:
-			if len(v) > 0 {
-				vSlice = []interface{}{v[0]}
-			}
-		case []bool:
-			if len(v) > 0 {
-				vSlice = []interface{}{v[0]}
-			}
-		case []map[string]interface{}:
-			if len(v) > 0 {
-				vSlice = []interface{}{v[0]}
-			}
-		case []float64:
-			if len(v) > 0 {
-				vSlice = []interface{}{v[0]}
-			}
-		case []float32:
-			if len(v) > 0 {
-				vSlice = []interface{}{v[0]}
-			}
-		case []int:
-			if len(v) > 0 {
-				vSlice = []interface{}{v[0]}
-			}
-		case []int32:
-			if len(v) > 0 {
-				vSlice = []interface{}{v[0]}
-			}
-		case []int64:
-			if len(v) > 0 {
-				vSlice = []interface{}{v[0]}
-			}
-		default:
-			vSlice = []interface{}{v}
-		}
+func CoerceList(v any) []any {
+	if v == nil {
+		return nil
 	}
-	return vSlice
+
+	switch v := v.(type) {
+	case []any:
+		// already a slice no coercion required
+		return v
+	case []string:
+		return toAnySlice(v)
+	case []json.Number:
+		return toAnySlice(v)
+	case []bool:
+		return toAnySlice(v)
+	case []map[string]any:
+		return toAnySlice(v)
+	case []float64:
+		return toAnySlice(v)
+	case []float32:
+		return toAnySlice(v)
+	case []int:
+		return toAnySlice(v)
+	case []int32:
+		return toAnySlice(v)
+	case []int64:
+		return toAnySlice(v)
+	default:
+		return []any{v}
+	}
+}
+
+func toAnySlice[T any](in []T) []any {
+	out := make([]any, len(in))
+	for i, v := range in {
+		out[i] = v
+	}
+	return out
 }

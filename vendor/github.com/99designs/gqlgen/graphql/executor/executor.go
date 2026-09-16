@@ -7,10 +7,13 @@ import (
 	"github.com/vektah/gqlparser/v2/gqlerror"
 	"github.com/vektah/gqlparser/v2/parser"
 	"github.com/vektah/gqlparser/v2/validator"
+	"github.com/vektah/gqlparser/v2/validator/rules"
 
 	"github.com/99designs/gqlgen/graphql"
 	"github.com/99designs/gqlgen/graphql/errcode"
 )
+
+const parserTokenNoLimit = 0
 
 // Executor executes graphql queries against a schema.
 type Executor struct {
@@ -20,7 +23,11 @@ type Executor struct {
 
 	errorPresenter graphql.ErrorPresenterFunc
 	recoverFunc    graphql.RecoverFunc
-	queryCache     graphql.Cache
+	queryCache     graphql.Cache[*ast.QueryDocument]
+
+	parserTokenLimit  int
+	disableSuggestion bool
+	defaultRulesFn    func() *rules.Rules
 }
 
 var _ graphql.GraphExecutor = &Executor{}
@@ -29,20 +36,26 @@ var _ graphql.GraphExecutor = &Executor{}
 // recovery callbacks, and no query cache or extensions.
 func New(es graphql.ExecutableSchema) *Executor {
 	e := &Executor{
-		es:             es,
-		errorPresenter: graphql.DefaultErrorPresenter,
-		recoverFunc:    graphql.DefaultRecover,
-		queryCache:     graphql.NoCache{},
-		ext:            processExtensions(nil),
+		es:               es,
+		errorPresenter:   graphql.DefaultErrorPresenter,
+		recoverFunc:      graphql.DefaultRecover,
+		queryCache:       graphql.NoCache[*ast.QueryDocument]{},
+		ext:              processExtensions(nil),
+		parserTokenLimit: parserTokenNoLimit,
 	}
 	return e
+}
+
+// SetDefaultRulesFn is to customize the Default GraphQL Validation Rules
+func (e *Executor) SetDefaultRulesFn(f func() *rules.Rules) {
+	e.defaultRulesFn = f
 }
 
 func (e *Executor) CreateOperationContext(
 	ctx context.Context,
 	params *graphql.RawParams,
 ) (*graphql.OperationContext, gqlerror.List) {
-	rc := &graphql.OperationContext{
+	opCtx := &graphql.OperationContext{
 		DisableIntrospection:   true,
 		RecoverFunc:            e.recoverFunc,
 		ResolverMiddleware:     e.ext.fieldMiddleware,
@@ -52,69 +65,93 @@ func (e *Executor) CreateOperationContext(
 			OperationStart: graphql.GetStartTime(ctx),
 		},
 	}
-	ctx = graphql.WithOperationContext(ctx, rc)
+	ctx = graphql.WithOperationContext(ctx, opCtx)
 
 	for _, p := range e.ext.operationParameterMutators {
 		if err := p.MutateOperationParameters(ctx, params); err != nil {
-			return rc, gqlerror.List{err}
+			return opCtx, gqlerror.List{err}
 		}
 	}
 
-	rc.RawQuery = params.Query
-	rc.OperationName = params.OperationName
-	rc.Headers = params.Headers
+	opCtx.RawQuery = params.Query
+	opCtx.OperationName = params.OperationName
+	opCtx.Extensions = params.Extensions
+	opCtx.Headers = params.Headers
 
 	var listErr gqlerror.List
-	rc.Doc, listErr = e.parseQuery(ctx, &rc.Stats, params.Query)
+	opCtx.Doc, listErr = e.parseQuery(ctx, &opCtx.Stats, params.Query)
 	if len(listErr) != 0 {
-		return rc, listErr
+		return opCtx, listErr
 	}
 
-	rc.Operation = rc.Doc.Operations.ForName(params.OperationName)
-	if rc.Operation == nil {
+	opCtx.Operation = opCtx.Doc.Operations.ForName(params.OperationName)
+	if opCtx.Operation == nil {
 		err := gqlerror.Errorf("operation %s not found", params.OperationName)
 		errcode.Set(err, errcode.ValidationFailed)
-		return rc, gqlerror.List{err}
+		return opCtx, gqlerror.List{err}
 	}
 
 	var err error
-	rc.Variables, err = validator.VariableValues(e.es.Schema(), rc.Operation, params.Variables)
-
+	opCtx.Variables, err = validator.VariableValues(
+		e.es.Schema(),
+		opCtx.Operation,
+		params.Variables,
+	)
 	if err != nil {
 		gqlErr, ok := err.(*gqlerror.Error)
 		if ok {
 			errcode.Set(gqlErr, errcode.ValidationFailed)
-			return rc, gqlerror.List{gqlErr}
+			return opCtx, gqlerror.List{gqlErr}
 		}
 	}
-	rc.Stats.Validation.End = graphql.Now()
+	opCtx.Stats.Validation.End = graphql.Now()
 
 	for _, p := range e.ext.operationContextMutators {
-		if err := p.MutateOperationContext(ctx, rc); err != nil {
-			return rc, gqlerror.List{err}
+		if err := p.MutateOperationContext(ctx, opCtx); err != nil {
+			return opCtx, gqlerror.List{err}
 		}
 	}
 
-	return rc, nil
+	return opCtx, nil
 }
 
 func (e *Executor) DispatchOperation(
 	ctx context.Context,
-	rc *graphql.OperationContext,
+	opCtx *graphql.OperationContext,
 ) (graphql.ResponseHandler, context.Context) {
-	ctx = graphql.WithOperationContext(ctx, rc)
+	innerCtx := graphql.WithOperationContext(ctx, opCtx)
 
-	var innerCtx context.Context
-	res := e.ext.operationMiddleware(ctx, func(ctx context.Context) graphql.ResponseHandler {
+	res := e.ext.operationMiddleware(innerCtx, func(ctx context.Context) graphql.ResponseHandler {
 		innerCtx = ctx
 
 		tmpResponseContext := graphql.WithResponseContext(ctx, e.errorPresenter, e.recoverFunc)
+
+		// If the schema implements the optional ExecutableSchemaWithEventContext
+		// interface AND this operation is a subscription (because at least one
+		// of its subscription fields is annotated with @subscriptionContext),
+		// use the event-aware dispatch path so AroundResponses interceptors see
+		// the per-event ctx as their ctx parameter. Queries and mutations
+		// continue down the default path even when the optional interface is
+		// implemented, so they remain byte-identical to the pre-directive
+		// behavior.
+		if opCtx.Operation.Operation == ast.Subscription {
+			if esEvent, ok := e.es.(graphql.ExecutableSchemaWithEventContext); ok {
+				return e.dispatchWithEventContext(tmpResponseContext, esEvent)
+			}
+		}
+
 		responses := e.es.Exec(tmpResponseContext)
 		if errs := graphql.GetErrors(tmpResponseContext); errs != nil {
 			return graphql.OneShot(&graphql.Response{Errors: errs})
 		}
 
 		return func(ctx context.Context) *graphql.Response {
+			// nil is the end-of-stream signal for transports that iterate on
+			// this handler; honor context cancellation by emitting it instead
+			// of producing further responses no consumer will receive.
+			if ctx.Err() != nil {
+				return nil
+			}
 			ctx = graphql.WithResponseContext(ctx, e.errorPresenter, e.recoverFunc)
 			resp := e.ext.responseMiddleware(ctx, func(ctx context.Context) *graphql.Response {
 				resp := responses(ctx)
@@ -136,6 +173,37 @@ func (e *Executor) DispatchOperation(
 	return res, innerCtx
 }
 
+// dispatchWithEventContext runs the event-aware dispatch loop used when the
+// generated schema reports a per-iteration context. The resolver is invoked
+// outside the responseMiddleware chain so that the chain can run with the
+// per-event ctx as its first argument; this is the trade-off documented on
+// [graphql.ExecutableSchemaWithEventContext].
+func (e *Executor) dispatchWithEventContext(
+	tmpResponseContext context.Context,
+	es graphql.ExecutableSchemaWithEventContext,
+) graphql.ResponseHandler {
+	responses := es.ExecWithEventContext(tmpResponseContext)
+	if errs := graphql.GetErrors(tmpResponseContext); errs != nil {
+		return graphql.OneShot(&graphql.Response{Errors: errs})
+	}
+
+	return func(ctx context.Context) *graphql.Response {
+		if ctx.Err() != nil {
+			return nil
+		}
+		ctx = graphql.WithResponseContext(ctx, e.errorPresenter, e.recoverFunc)
+		eventCtx, raw := responses(ctx)
+		if raw == nil {
+			return nil
+		}
+		return e.ext.responseMiddleware(eventCtx, func(ctx context.Context) *graphql.Response {
+			raw.Errors = append(raw.Errors, graphql.GetErrors(ctx)...)
+			raw.Extensions = graphql.GetExtensions(ctx)
+			return raw
+		})
+	}
+}
+
 func (e *Executor) DispatchError(ctx context.Context, list gqlerror.List) *graphql.Response {
 	ctx = graphql.WithResponseContext(ctx, e.errorPresenter, e.recoverFunc)
 	for _, gErr := range list {
@@ -153,11 +221,11 @@ func (e *Executor) DispatchError(ctx context.Context, list gqlerror.List) *graph
 	return resp
 }
 
-func (e *Executor) PresentRecoveredError(ctx context.Context, err interface{}) error {
+func (e *Executor) PresentRecoveredError(ctx context.Context, err any) error {
 	return e.errorPresenter(ctx, e.recoverFunc(ctx, err))
 }
 
-func (e *Executor) SetQueryCache(cache graphql.Cache) {
+func (e *Executor) SetQueryCache(cache graphql.Cache[*ast.QueryDocument]) {
 	e.queryCache = cache
 }
 
@@ -167,6 +235,14 @@ func (e *Executor) SetErrorPresenter(f graphql.ErrorPresenterFunc) {
 
 func (e *Executor) SetRecoverFunc(f graphql.RecoverFunc) {
 	e.recoverFunc = f
+}
+
+func (e *Executor) SetParserTokenLimit(limit int) {
+	e.parserTokenLimit = limit
+}
+
+func (e *Executor) SetDisableSuggestion(value bool) {
+	e.disableSuggestion = value
 }
 
 // parseQuery decodes the incoming query and validates it, pulling from cache if present.
@@ -186,10 +262,10 @@ func (e *Executor) parseQuery(
 
 		stats.Parsing.End = now
 		stats.Validation.Start = now
-		return doc.(*ast.QueryDocument), nil
+		return doc, nil
 	}
 
-	doc, err := parser.ParseQuery(&ast.Source{Input: query})
+	doc, err := parser.ParseQueryWithTokenLimit(&ast.Source{Input: query}, e.parserTokenLimit)
 	if err != nil {
 		gqlErr, ok := err.(*gqlerror.Error)
 		if ok {
@@ -201,14 +277,42 @@ func (e *Executor) parseQuery(
 
 	stats.Validation.Start = graphql.Now()
 
-	if len(doc.Operations) == 0 {
+	if doc == nil || len(doc.Operations) == 0 {
 		err = gqlerror.Errorf("no operation provided")
 		gqlErr, _ := err.(*gqlerror.Error)
 		errcode.Set(err, errcode.ValidationFailed)
 		return nil, gqlerror.List{gqlErr}
 	}
 
-	listErr := validator.Validate(e.es.Schema(), doc)
+	var currentRules *rules.Rules
+	if e.defaultRulesFn == nil {
+		currentRules = rules.NewDefaultRules()
+	} else {
+		currentRules = e.defaultRulesFn()
+	}
+	// Customise rules as required
+	// TODO(steve): consider currentRules.RemoveRule(rules.MaxIntrospectionDepth.Name)
+
+	// swap out the FieldsOnCorrectType rule with one that doesn't provide suggestions
+	if e.disableSuggestion {
+		currentRules.RemoveRule("FieldsOnCorrectType")
+		fieldsOnCorrectTypeRule := rules.FieldsOnCorrectTypeRuleWithoutSuggestions
+		currentRules.AddRule(fieldsOnCorrectTypeRule.Name, fieldsOnCorrectTypeRule.RuleFunc)
+
+		currentRules.RemoveRule("ScalarLeafs")
+		scalarLeafsRule := rules.ScalarLeafsRuleWithoutSuggestions
+		currentRules.AddRule(scalarLeafsRule.Name, scalarLeafsRule.RuleFunc)
+	} else { // or vice versa
+		currentRules.RemoveRule("FieldsOnCorrectTypeWithoutSuggestions")
+		fieldsOnCorrectTypeRule := rules.FieldsOnCorrectTypeRule
+		currentRules.AddRule(fieldsOnCorrectTypeRule.Name, fieldsOnCorrectTypeRule.RuleFunc)
+
+		currentRules.RemoveRule("ScalarLeafsWithoutSuggestions")
+		scalarLeafsRule := rules.ScalarLeafsRule
+		currentRules.AddRule(scalarLeafsRule.Name, scalarLeafsRule.RuleFunc)
+	}
+
+	listErr := validator.ValidateWithRules(e.es.Schema(), doc, currentRules)
 	if len(listErr) != 0 {
 		for _, e := range listErr {
 			errcode.Set(e, errcode.ValidationFailed)

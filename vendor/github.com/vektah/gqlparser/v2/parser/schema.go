@@ -1,8 +1,7 @@
 package parser
 
 import (
-	//nolint:revive
-	. "github.com/vektah/gqlparser/v2/ast"
+	. "github.com/vektah/gqlparser/v2/ast" //nolint:staticcheck // bad, yeah
 	"github.com/vektah/gqlparser/v2/lexer"
 )
 
@@ -20,7 +19,40 @@ func ParseSchemas(inputs ...*Source) (*SchemaDocument, error) {
 
 func ParseSchema(source *Source) (*SchemaDocument, error) {
 	p := parser{
-		lexer: lexer.New(source),
+		lexer:         lexer.New(source),
+		maxTokenLimit: 0, // default value is unlimited
+	}
+	sd, err := p.parseSchemaDocument(), p.err
+	if err != nil {
+		return nil, err
+	}
+
+	for _, def := range sd.Definitions {
+		def.BuiltIn = source.BuiltIn
+	}
+	for _, def := range sd.Extensions {
+		def.BuiltIn = source.BuiltIn
+	}
+
+	return sd, nil
+}
+
+func ParseSchemasWithLimit(maxTokenLimit int, inputs ...*Source) (*SchemaDocument, error) {
+	sd := &SchemaDocument{}
+	for _, input := range inputs {
+		inputAst, err := ParseSchemaWithLimit(input, maxTokenLimit)
+		if err != nil {
+			return nil, err
+		}
+		sd.Merge(inputAst)
+	}
+	return sd, nil
+}
+
+func ParseSchemaWithLimit(source *Source, maxTokenLimit int) (*SchemaDocument, error) {
+	p := parser{
+		lexer:         lexer.New(source),
+		maxTokenLimit: maxTokenLimit, // 0 is unlimited
 	}
 	sd, err := p.parseSchemaDocument(), p.err
 	if err != nil {
@@ -199,7 +231,6 @@ func (p *parser) parseFieldsDefinition() (FieldList, *CommentGroup) {
 
 func (p *parser) parseFieldDefinition() *FieldDefinition {
 	var def FieldDefinition
-	def.Position = p.peekPos()
 
 	desc := p.parseDescription()
 	if desc.text != "" {
@@ -209,6 +240,7 @@ func (p *parser) parseFieldDefinition() *FieldDefinition {
 
 	p.peek() // peek to set p.comment
 	def.AfterDescriptionComment = p.comment
+	def.Position = p.peekPos()
 	def.Name = p.parseName()
 	def.Arguments = p.parseArgumentDefs()
 	p.expect(lexer.Colon)
@@ -228,7 +260,6 @@ func (p *parser) parseArgumentDefs() ArgumentDefinitionList {
 
 func (p *parser) parseArgumentDef() *ArgumentDefinition {
 	var def ArgumentDefinition
-	def.Position = p.peekPos()
 
 	desc := p.parseDescription()
 	if desc.text != "" {
@@ -238,6 +269,7 @@ func (p *parser) parseArgumentDef() *ArgumentDefinition {
 
 	p.peek() // peek to set p.comment
 	def.AfterDescriptionComment = p.comment
+	def.Position = p.peekPos()
 	def.Name = p.parseName()
 	p.expect(lexer.Colon)
 	def.Type = p.parseTypeReference()
@@ -250,7 +282,6 @@ func (p *parser) parseArgumentDef() *ArgumentDefinition {
 
 func (p *parser) parseInputValueDef() *FieldDefinition {
 	var def FieldDefinition
-	def.Position = p.peekPos()
 
 	desc := p.parseDescription()
 	if desc.text != "" {
@@ -260,6 +291,7 @@ func (p *parser) parseInputValueDef() *FieldDefinition {
 
 	p.peek() // peek to set p.comment
 	def.AfterDescriptionComment = p.comment
+	def.Position = p.peekPos()
 	def.Name = p.parseName()
 	p.expect(lexer.Colon)
 	def.Type = p.parseTypeReference()
@@ -297,22 +329,26 @@ func (p *parser) parseUnionTypeDefinition(description descriptionWithComment) *D
 	def.AfterDescriptionComment = comment
 	def.Name = p.parseName()
 	def.Directives = p.parseDirectives(true)
-	def.Types = p.parseUnionMemberTypes()
+	def.Types, def.TypePositions = p.parseUnionMemberTypes()
 	return &def
 }
 
-func (p *parser) parseUnionMemberTypes() []string {
-	var types []string
+// parseUnionMemberTypes parses a union's member type list. It returns the member
+// type names alongside their source positions; the two slices have equal length
+// (one position per name), so callers can report errors at a specific member.
+func (p *parser) parseUnionMemberTypes() (types []string, positions []*Position) {
 	if p.skip(lexer.Equals) {
 		// optional leading pipe
 		p.skip(lexer.Pipe)
 
+		positions = append(positions, p.peekPos())
 		types = append(types, p.parseName())
 		for p.skip(lexer.Pipe) && p.err == nil {
+			positions = append(positions, p.peekPos())
 			types = append(types, p.parseName())
 		}
 	}
-	return types
+	return types, positions
 }
 
 func (p *parser) parseEnumTypeDefinition(description descriptionWithComment) *Definition {
@@ -340,7 +376,6 @@ func (p *parser) parseEnumValuesDefinition() (EnumValueList, *CommentGroup) {
 
 func (p *parser) parseEnumValueDefinition() *EnumValueDefinition {
 	var def EnumValueDefinition
-	def.Position = p.peekPos()
 	desc := p.parseDescription()
 	if desc.text != "" {
 		def.BeforeDescriptionComment = desc.comment
@@ -349,7 +384,7 @@ func (p *parser) parseEnumValueDefinition() *EnumValueDefinition {
 
 	p.peek() // peek to set p.comment
 	def.AfterDescriptionComment = p.comment
-
+	def.Position = p.peekPos()
 	def.Name = p.parseName()
 	def.Directives = p.parseDirectives(true)
 
@@ -475,7 +510,7 @@ func (p *parser) parseUnionTypeExtension(comment *CommentGroup) *Definition {
 	def.Kind = Union
 	def.Name = p.parseName()
 	def.Directives = p.parseDirectives(true)
-	def.Types = p.parseUnionMemberTypes()
+	def.Types, def.TypePositions = p.parseUnionMemberTypes()
 
 	if len(def.Directives) == 0 && len(def.Types) == 0 {
 		p.unexpectedError()

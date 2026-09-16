@@ -1,5 +1,5 @@
 /*
- * Copyright 2018-2019 The NATS Authors
+ * Copyright 2018-2024 The NATS Authors
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -29,12 +29,14 @@ const (
 	ConnectionTypeLeafnodeWS = "LEAFNODE_WS"
 	ConnectionTypeMqtt       = "MQTT"
 	ConnectionTypeMqttWS     = "MQTT_WS"
+	ConnectionTypeInProcess  = "IN_PROCESS"
 )
 
 type UserPermissionLimits struct {
 	Permissions
 	Limits
 	BearerToken            bool       `json:"bearer_token,omitempty"`
+	ProxyRequired          bool       `json:"proxy_required,omitempty"`
 	AllowedConnectionTypes StringList `json:"allowed_connection_types,omitempty"`
 }
 
@@ -91,11 +93,15 @@ func (u *UserClaims) HasEmptyPermissions() bool {
 
 // Encode tries to turn the user claims into a JWT string
 func (u *UserClaims) Encode(pair nkeys.KeyPair) (string, error) {
+	return u.EncodeWithSigner(pair, nil)
+}
+
+func (u *UserClaims) EncodeWithSigner(pair nkeys.KeyPair, fn SignFn) (string, error) {
 	if !nkeys.IsValidPublicUserKey(u.Subject) {
 		return "", errors.New("expected subject to be user public key")
 	}
 	u.Type = UserClaim
-	return u.ClaimsData.encode(pair, u)
+	return u.ClaimsData.encode(pair, u, fn)
 }
 
 // DecodeUserClaims tries to parse a user claims from a JWT string

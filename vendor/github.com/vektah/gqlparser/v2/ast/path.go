@@ -14,8 +14,10 @@ type PathElement interface {
 	isPathElement()
 }
 
-var _ PathElement = PathIndex(0)
-var _ PathElement = PathName("")
+var (
+	_ PathElement = PathIndex(0)
+	_ PathElement = PathName("")
+)
 
 func (path Path) String() string {
 	if path == nil {
@@ -25,7 +27,7 @@ func (path Path) String() string {
 	for i, v := range path {
 		switch v := v.(type) {
 		case PathIndex:
-			str.WriteString(fmt.Sprintf("[%d]", v))
+			fmt.Fprintf(&str, "[%d]", v)
 		case PathName:
 			if i != 0 {
 				str.WriteByte('.')
@@ -39,7 +41,7 @@ func (path Path) String() string {
 }
 
 func (path *Path) UnmarshalJSON(b []byte) error {
-	var vs []interface{}
+	var vs []any
 	err := json.Unmarshal(b, &vs)
 	if err != nil {
 		return err

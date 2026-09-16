@@ -2,13 +2,14 @@ package lexer
 
 import (
 	"bytes"
+	"slices"
 	"unicode/utf8"
 
 	"github.com/vektah/gqlparser/v2/ast"
 	"github.com/vektah/gqlparser/v2/gqlerror"
 )
 
-// Lexer turns graphql request and schema strings into tokens
+// Lexer turns graphql request and schema strings into tokens.
 type Lexer struct {
 	*ast.Source
 	// An offset into the string in bytes
@@ -32,7 +33,7 @@ func New(src *ast.Source) Lexer {
 	}
 }
 
-// take one rune from input and advance end
+// take one rune from input and advance end.
 func (s *Lexer) peek() (rune, int) {
 	return utf8.DecodeRuneInString(s.Input[s.end:])
 }
@@ -55,7 +56,7 @@ func (s *Lexer) makeValueToken(kind Type, value string) (Token, error) {
 	}, nil
 }
 
-func (s *Lexer) makeError(format string, args ...interface{}) (Token, *gqlerror.Error) {
+func (s *Lexer) makeError(format string, args ...any) (Token, *gqlerror.Error) {
 	column := s.endRunes - s.lineStartRunes + 1
 	return Token{
 		Kind: Invalid,
@@ -66,7 +67,7 @@ func (s *Lexer) makeError(format string, args ...interface{}) (Token, *gqlerror.
 			Column: column,
 			Src:    s.Source,
 		},
-	}, gqlerror.ErrorLocf(s.Source.Name, s.line, column, format, args...)
+	}, gqlerror.ErrorLocf(s.Name, s.line, column, format, args...)
 }
 
 // ReadToken gets the next token from the source starting at the given position.
@@ -122,7 +123,59 @@ func (s *Lexer) ReadToken() (Token, error) {
 	case '#':
 		return s.readComment()
 
-	case '_', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z':
+	case '_',
+		'a',
+		'b',
+		'c',
+		'd',
+		'e',
+		'f',
+		'g',
+		'h',
+		'i',
+		'j',
+		'k',
+		'l',
+		'm',
+		'n',
+		'o',
+		'p',
+		'q',
+		'r',
+		's',
+		't',
+		'u',
+		'v',
+		'w',
+		'x',
+		'y',
+		'z',
+		'A',
+		'B',
+		'C',
+		'D',
+		'E',
+		'F',
+		'G',
+		'H',
+		'I',
+		'J',
+		'K',
+		'L',
+		'M',
+		'N',
+		'O',
+		'P',
+		'Q',
+		'R',
+		'S',
+		'T',
+		'U',
+		'V',
+		'W',
+		'X',
+		'Y',
+		'Z':
 		return s.readName()
 
 	case '-', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
@@ -140,18 +193,20 @@ func (s *Lexer) ReadToken() (Token, error) {
 	s.endRunes--
 
 	if r < 0x0020 && r != 0x0009 && r != 0x000a && r != 0x000d {
-		return s.makeError(`Cannot contain the invalid character "\u%04d"`, r)
+		return s.makeError(`Cannot contain the invalid character "\u%04x"`, r)
 	}
 
 	if r == '\'' {
-		return s.makeError(`Unexpected single quote character ('), did you mean to use a double quote (")?`)
+		return s.makeError(
+			`Unexpected single quote character ('), did you mean to use a double quote (")?`,
+		)
 	}
 
 	return s.makeError(`Cannot parse the unexpected character "%s".`, string(r))
 }
 
 // ws reads from body starting at startPosition until it finds a non-whitespace
-// or commented character, and updates the token end to include all whitespace
+// or commented character, and updates the token end to include all whitespace.
 func (s *Lexer) ws() {
 	for s.end < len(s.Input) {
 		switch s.Input[s.end] {
@@ -189,7 +244,7 @@ func (s *Lexer) ws() {
 
 // readComment from the input
 //
-// #[\u0009\u0020-\uFFFF]*
+// #[\u0009\u0020-\uFFFF]*.
 func (s *Lexer) readComment() (Token, error) {
 	for s.end < len(s.Input) {
 		r, w := s.peek()
@@ -254,26 +309,23 @@ func (s *Lexer) readNumber() (Token, error) {
 		return s.makeToken(Float)
 	}
 	return s.makeToken(Int)
-
 }
 
-// acceptByte if it matches any of given bytes, returning true if it found anything
+// acceptByte if it matches any of given bytes, returning true if it found anything.
 func (s *Lexer) acceptByte(bytes ...uint8) bool {
 	if s.end >= len(s.Input) {
 		return false
 	}
 
-	for _, accepted := range bytes {
-		if s.Input[s.end] == accepted {
-			s.end++
-			s.endRunes++
-			return true
-		}
+	if slices.Contains(bytes, s.Input[s.end]) {
+		s.end++
+		s.endRunes++
+		return true
 	}
 	return false
 }
 
-// acceptDigits from the input, returning the number of digits it found
+// acceptDigits from the input, returning the number of digits it found.
 func (s *Lexer) acceptDigits() int {
 	consumed := 0
 	for s.end < len(s.Input) && s.Input[s.end] >= '0' && s.Input[s.end] <= '9' {
@@ -286,7 +338,7 @@ func (s *Lexer) acceptDigits() int {
 }
 
 // describeNext peeks at the input and returns a human readable string. This should will alloc
-// and should only be used in errors
+// and should only be used in errors.
 func (s *Lexer) describeNext() string {
 	if s.end < len(s.Input) {
 		return `"` + string(s.Input[s.end]) + `"`
@@ -296,7 +348,7 @@ func (s *Lexer) describeNext() string {
 
 // readString from the input
 //
-// "([^"\\\u000A\u000D]|(\\(u[0-9a-fA-F]{4}|["\\/bfnrt])))*"
+// "([^"\\\u000A\u000D]|(\\(u[0-9a-fA-F]{4}|["\\/bfnrt])))*".
 func (s *Lexer) readString() (Token, error) {
 	inputLen := len(s.Input)
 
@@ -313,12 +365,12 @@ func (s *Lexer) readString() (Token, error) {
 			break
 		}
 		if r < 0x0020 && r != '\t' {
-			return s.makeError(`Invalid character within String: "\u%04d".`, r)
+			return s.makeError(`Invalid character within String: "\u%04x".`, r)
 		}
 		switch r {
 		default:
-			var char = rune(r)
-			var w = 1
+			char := rune(r)
+			w := 1
 
 			// skip unicode overhead if we are in the ascii range
 			if r >= 127 {
@@ -333,7 +385,8 @@ func (s *Lexer) readString() (Token, error) {
 
 		case '"':
 			t, err := s.makeToken(String)
-			// the token should not include the quotes in its value, but should cover them in its position
+			// the token should not include the quotes in its value, but should cover them in its
+			// position
 			t.Pos.Start--
 			t.Pos.End++
 
@@ -371,7 +424,10 @@ func (s *Lexer) readString() (Token, error) {
 				if !ok {
 					s.end++
 					s.endRunes++
-					return s.makeError("Invalid character escape sequence: \\%s.", s.Input[s.end:s.end+5])
+					return s.makeError(
+						"Invalid character escape sequence: \\%s.",
+						s.Input[s.end:s.end+5],
+					)
 				}
 				buf.WriteRune(r)
 				s.end += 6
@@ -406,7 +462,7 @@ func (s *Lexer) readString() (Token, error) {
 
 // readBlockString from the input
 //
-// """("?"?(\\"""|\\(?!=""")|[^"\\]))*"""
+// """("?"?(\\"""|\\(?!=""")|[^"\\]))*""".
 func (s *Lexer) readBlockString() (Token, error) {
 	inputLen := len(s.Input)
 
@@ -422,29 +478,42 @@ func (s *Lexer) readBlockString() (Token, error) {
 		r := s.Input[s.end]
 
 		// Closing triple quote (""")
-		if r == '"' && s.end+3 <= inputLen && s.Input[s.end:s.end+3] == `"""` {
-			t, err := s.makeValueToken(BlockString, blockStringValue(buf.String()))
+		if r == '"' {
+			// Count consecutive quotes
+			quoteCount := 1
+			i := s.end + 1
+			for i < inputLen && s.Input[i] == '"' {
+				quoteCount++
+				i++
+			}
 
-			// the token should not include the quotes in its value, but should cover them in its position
-			t.Pos.Start -= 3
-			t.Pos.End += 3
+			// If we have at least 3 quotes, use the last 3 as the closing quote
+			if quoteCount >= 3 {
+				// Add any extra quotes to the buffer (except the last 3)
+				for range quoteCount - 3 {
+					buf.WriteByte('"')
+				}
 
-			// skip the close quote
-			s.end += 3
-			s.endRunes += 3
-			return t, err
+				t, err := s.makeValueToken(BlockString, blockStringValue(buf.String()))
+				t.Pos.Start -= 3
+				t.Pos.End += 3
+				s.end += quoteCount
+				s.endRunes += quoteCount
+				return t, err
+			}
 		}
 
 		// SourceCharacter
 		if r < 0x0020 && r != '\t' && r != '\n' && r != '\r' {
-			return s.makeError(`Invalid character within String: "\u%04d".`, r)
+			return s.makeError(`Invalid character within String: "\u%04x".`, r)
 		}
 
-		if r == '\\' && s.end+4 <= inputLen && s.Input[s.end:s.end+4] == `\"""` {
+		switch {
+		case r == '\\' && s.end+4 <= inputLen && s.Input[s.end:s.end+4] == `\"""`:
 			buf.WriteString(`"""`)
 			s.end += 4
 			s.endRunes += 4
-		} else if r == '\r' {
+		case r == '\r':
 			if s.end+1 < inputLen && s.Input[s.end+1] == '\n' {
 				s.end++
 				s.endRunes++
@@ -455,9 +524,9 @@ func (s *Lexer) readBlockString() (Token, error) {
 			s.endRunes++
 			s.line++
 			s.lineStartRunes = s.endRunes
-		} else {
-			var char = rune(r)
-			var w = 1
+		default:
+			char := rune(r)
+			w := 1
 
 			// skip unicode overhead if we are in the ascii range
 			if r >= 127 {
@@ -496,7 +565,7 @@ func unhex(b string) (v rune, ok bool) {
 
 // readName from the input
 //
-// [_A-Za-z][_0-9A-Za-z]*
+// [_A-Za-z][_0-9A-Za-z]*.
 func (s *Lexer) readName() (Token, error) {
 	for s.end < len(s.Input) {
 		r, w := s.peek()

@@ -1,4 +1,4 @@
-// Copyright 2020 The NATS Authors
+// Copyright 2020-2023 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -27,45 +27,55 @@
 package natscontext
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
+	"github.com/nats-io/jsm.go"
+	"github.com/nats-io/nats-server/v2/server/certstore"
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nkeys"
 )
 
 type Option func(c *settings)
 
 type settings struct {
-	Name          string `json:"name,omitempty"`
-	Description   string `json:"description"`
-	URL           string `json:"url"`
-	nscUrl        string
-	SocksProxy    string `json:"socks_proxy"`
-	Token         string `json:"token"`
-	User          string `json:"user"`
-	Password      string `json:"password"`
-	Creds         string `json:"creds"`
-	nscCreds      string
-	NKey          string `json:"nkey"`
-	Cert          string `json:"cert"`
-	Key           string `json:"key"`
-	CA            string `json:"ca"`
-	NSCLookup     string `json:"nsc"`
-	JSDomain      string `json:"jetstream_domain"`
-	JSAPIPrefix   string `json:"jetstream_api_prefix"`
-	JSEventPrefix string `json:"jetstream_event_prefix"`
-	InboxPrefix   string `json:"inbox_prefix"`
-	UserJwt       string `json:"user_jwt"`
-	ColorScheme   string `json:"color_scheme"`
-	TLSFirst      bool   `json:"tls_first"`
+	Name                string `json:"name,omitempty"`
+	Description         string `json:"description"`
+	URL                 string `json:"url"`
+	nscUrl              string
+	SocksProxy          string `json:"socks_proxy"`
+	Token               string `json:"token"`
+	User                string `json:"user"`
+	Password            string `json:"password"`
+	Creds               string `json:"creds"`
+	nscCreds            string
+	NKey                string   `json:"nkey"`
+	Cert                string   `json:"cert"`
+	Key                 string   `json:"key"`
+	CA                  string   `json:"ca"`
+	NSCLookup           string   `json:"nsc"`
+	JSDomain            string   `json:"jetstream_domain"`
+	JSAPIPrefix         string   `json:"jetstream_api_prefix"`
+	JSEventPrefix       string   `json:"jetstream_event_prefix"`
+	InboxPrefix         string   `json:"inbox_prefix"`
+	UserJwt             string   `json:"user_jwt"`
+	UserSeed            string   `json:"user_seed"`
+	ColorScheme         string   `json:"color_scheme"`
+	TLSFirst            bool     `json:"tls_first"`
+	WinCertStoreType    string   `json:"windows_cert_store"`
+	WinCertStoreMatchBy string   `json:"windows_cert_match_by"`
+	WinCertStoreMatch   string   `json:"windows_cert_match"`
+	WinCertStoreCaMatch []string `json:"windows_ca_certs_match"`
 }
 
 type Context struct {
@@ -73,6 +83,11 @@ type Context struct {
 	config *settings
 	path   string
 }
+
+const (
+	selectedCtxFile string = "context.txt"
+	previousCtxFile string = "previous-context.txt"
+)
 
 // New loads a new configuration context. If name is empty the current active
 // one will be loaded.  If load is false no loading of existing data is done
@@ -189,7 +204,7 @@ func DeleteContext(name string) error {
 	}
 
 	if selected {
-		return os.Remove(filepath.Join(parent, "nats", "context.txt"))
+		return os.Remove(filepath.Join(parent, "nats", selectedCtxFile))
 	}
 
 	return nil
@@ -264,12 +279,21 @@ func KnownContexts() []string {
 
 // SelectedContext returns the name of the current selected context, empty when non is selected
 func SelectedContext() string {
+	return readCtxFromFile(selectedCtxFile)
+}
+
+// PreviousContext returns the name of the previous selected context, empty if it hasn't been selected before
+func PreviousContext() string {
+	return readCtxFromFile(previousCtxFile)
+}
+
+func readCtxFromFile(file string) string {
 	parent, err := parentDir()
 	if err != nil {
 		return ""
 	}
 
-	currentFile := filepath.Join(parent, "nats", "context.txt")
+	currentFile := filepath.Join(parent, "nats", file)
 
 	_, err = os.Stat(currentFile)
 	if os.IsNotExist(err) {
@@ -303,6 +327,17 @@ func (c *Context) Connect(opts ...nats.Option) (*nats.Conn, error) {
 	return nats.Connect(c.ServerURL(), nopts...)
 }
 
+// JSMOptions creates options for the jsm manager
+func (c *Context) JSMOptions(opts ...jsm.Option) ([]jsm.Option, error) {
+	jsmopts := []jsm.Option{
+		jsm.WithAPIPrefix(c.JSAPIPrefix()),
+		jsm.WithEventPrefix(c.JSEventPrefix()),
+		jsm.WithDomain(c.JSDomain()),
+	}
+
+	return append(jsmopts, opts...), nil
+}
+
 // NATSOptions creates NATS client configuration based on the contents of the context
 func (c *Context) NATSOptions(opts ...nats.Option) ([]nats.Option, error) {
 	var nopts []nats.Option
@@ -311,14 +346,53 @@ func (c *Context) NATSOptions(opts ...nats.Option) ([]nats.Option, error) {
 	case c.User() != "":
 		nopts = append(nopts, nats.UserInfo(c.User(), c.Password()))
 	case c.Creds() != "":
-		nopts = append(nopts, nats.UserCredentials(c.Creds()))
+		if strings.HasPrefix(c.Creds(), "op://") {
+			cmd := exec.Command("op", "read", c.Creds())
+			out, err := cmd.Output()
+			if err != nil {
+				return nil, err
+			}
+			jwt, err := nkeys.ParseDecoratedJWT(out)
+			if err != nil {
+				return nil, err
+			}
+			kp, err := nkeys.ParseDecoratedNKey(out)
+			if err != nil {
+				return nil, err
+			}
+
+			wipeSlice(out)
+
+			userCB := func() (string, error) {
+				return jwt, nil
+			}
+			sigCB := func(nonce []byte) ([]byte, error) {
+				return kp.Sign(nonce)
+			}
+			nopts = append(nopts, nats.UserJWT(userCB, sigCB))
+		} else {
+			nopts = append(nopts, nats.UserCredentials(expandHomedir(c.Creds())))
+		}
+
 	case c.NKey() != "":
-		nko, err := nats.NkeyOptionFromSeed(c.NKey())
+		nko, err := nats.NkeyOptionFromSeed(expandHomedir(c.NKey()))
 		if err != nil {
 			return nil, err
 		}
 
 		nopts = append(nopts, nko)
+
+	case c.UserJWT() != "" && c.UserSeed() != "":
+		nopts = append(nopts, nats.UserJWTAndSeed(c.UserJWT(), c.UserSeed()))
+
+	case c.UserJWT() != "" && c.UserSeed() == "":
+		userCB := func() (string, error) {
+			return c.UserJWT(), nil
+		}
+		sigCB := func(nonce []byte) ([]byte, error) {
+			return nil, nil
+		}
+		nopts = append(nopts, nats.UserJWT(userCB, sigCB))
 	}
 
 	if c.Token() != "" {
@@ -326,11 +400,11 @@ func (c *Context) NATSOptions(opts ...nats.Option) ([]nats.Option, error) {
 	}
 
 	if c.Certificate() != "" && c.Key() != "" {
-		nopts = append(nopts, nats.ClientCert(c.Certificate(), c.Key()))
+		nopts = append(nopts, nats.ClientCert(expandHomedir(c.Certificate()), expandHomedir(c.Key())))
 	}
 
 	if c.CA() != "" {
-		nopts = append(nopts, nats.RootCAs(c.CA()))
+		nopts = append(nopts, nats.RootCAs(expandHomedir(c.CA())))
 	}
 
 	if c.SocksProxy() != "" {
@@ -345,18 +419,75 @@ func (c *Context) NATSOptions(opts ...nats.Option) ([]nats.Option, error) {
 		nopts = append(nopts, nats.TLSHandshakeFirst())
 	}
 
-	u, err := url.Parse(c.ServerURL())
+	csOpts, err := c.certStoreNatsOptions()
 	if err != nil {
 		return nil, err
 	}
-
-	if u.IsAbs() && u.Path != "" {
-		nopts = append(nopts, nats.ProxyPath(u.Path))
-	}
+	nopts = append(nopts, csOpts...)
 
 	nopts = append(nopts, opts...)
 
 	return nopts, nil
+}
+
+func (c *Context) parseWinCertStoreType(t string) (certstore.StoreType, error) {
+	storeTypeString := t
+	switch storeTypeString {
+	case "machine":
+		storeTypeString = "windowslocalmachine"
+	case "user":
+		storeTypeString = "windowscurrentuser"
+	}
+
+	return certstore.ParseCertStore(storeTypeString)
+}
+
+func (c *Context) certStoreNatsOptions() ([]nats.Option, error) {
+	if c.config.WinCertStoreType == "" {
+		return nil, nil
+	}
+
+	storeType, err := c.parseWinCertStoreType(c.config.WinCertStoreType)
+	if err != nil {
+		return nil, err
+	}
+
+	matchBy, err := certstore.ParseCertMatchBy(c.config.WinCertStoreMatchBy)
+	if err != nil {
+		return nil, err
+	}
+
+	tlsc := &tls.Config{}
+	err = certstore.TLSConfig(storeType, matchBy, c.config.WinCertStoreMatch, c.config.WinCertStoreCaMatch, true, tlsc)
+	if err != nil {
+		return nil, err
+	}
+
+	if tlsc.ClientCAs != nil {
+		tlsc.RootCAs = tlsc.ClientCAs
+		tlsc.ClientCAs = nil
+	}
+
+	// if no ca match was given but we have CA as a file lets pull in that file here
+	if len(c.config.WinCertStoreCaMatch) == 0 && c.config.CA != "" {
+		rootCAs, _ := x509.SystemCertPool()
+		if rootCAs == nil {
+			rootCAs = x509.NewCertPool()
+		}
+
+		certs, err := os.ReadFile(c.config.CA)
+		if err != nil {
+			return nil, err
+		}
+
+		if ok := rootCAs.AppendCertsFromPEM(certs); !ok {
+			return nil, fmt.Errorf("failed to append CA certificates from %s", c.config.CA)
+		}
+
+		tlsc.RootCAs = rootCAs
+	}
+
+	return []nats.Option{nats.Secure(tlsc)}, nil
 }
 
 func (c *Context) loadActiveContext() error {
@@ -394,6 +525,13 @@ func (c *Context) loadActiveContext() error {
 	if err != nil {
 		return err
 	}
+
+	// Expand ~ and environment variables in all path fields.
+	c.config.Creds = expandHomedir(c.config.Creds)
+	c.config.NKey = expandHomedir(c.config.NKey)
+	c.config.Cert = expandHomedir(c.config.Cert)
+	c.config.Key = expandHomedir(c.config.Key)
+	c.config.CA = expandHomedir(c.config.CA)
 
 	if c.config.NSCLookup != "" {
 		err := c.resolveNscLookup()
@@ -445,8 +583,23 @@ func (c *Context) resolveNscLookup() error {
 	return nil
 }
 
+func expandHomedir(path string) string {
+	path = os.ExpandEnv(path)
+
+	if len(path) == 0 || path[0] != '~' {
+		return path
+	}
+
+	usr, err := user.Current()
+	if err != nil {
+		return path
+	}
+
+	return strings.Replace(path, "~", usr.HomeDir, 1)
+}
+
 func validName(name string) bool {
-	return name != "" && !strings.Contains(name, "..") && !strings.Contains(name, string(os.PathSeparator))
+	return name != "" && !strings.Contains(name, "..") && !strings.ContainsAny(name, "/\\")
 }
 
 func numCreds(c *Context) int {
@@ -456,6 +609,7 @@ func numCreds(c *Context) int {
 		c.config.Creds,
 		c.config.NKey,
 		c.config.NSCLookup,
+		c.config.UserJwt,
 	}
 
 	for _, c := range creds {
@@ -473,6 +627,25 @@ func createTree(parent string) error {
 
 func ctxDir(parent string) string {
 	return filepath.Join(parent, "nats", "context")
+}
+
+func UnSelectContext() error {
+	currentCtx := SelectedContext()
+	if currentCtx == "" {
+		return nil
+	}
+
+	parent, err := parentDir()
+	if err != nil {
+		return err
+	}
+
+	err = setPreviousContext(parent, currentCtx)
+	if err != nil {
+		return err
+	}
+
+	return os.Remove(filepath.Join(parent, "nats", selectedCtxFile))
 }
 
 // SelectContext sets the given context to be the default, error if it does not exist
@@ -495,7 +668,21 @@ func SelectContext(name string) error {
 		return err
 	}
 
-	return os.WriteFile(filepath.Join(parent, "nats", "context.txt"), []byte(name), 0600)
+	currentCtx := SelectedContext()
+	err = setPreviousContext(parent, currentCtx)
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(filepath.Join(parent, "nats", selectedCtxFile), []byte(name), 0600)
+}
+
+func setPreviousContext(parent string, name string) error {
+	if name == "" {
+		return nil
+	}
+
+	return os.WriteFile(filepath.Join(parent, "nats", previousCtxFile), []byte(name), 0600)
 }
 
 func (c *Context) MarshalJSON() ([]byte, error) {
@@ -510,6 +697,24 @@ func (c *Context) Validate() error {
 
 	if numCreds(c) > 1 {
 		return errors.New("too many types of credentials. Choose only one from 'user/token', 'creds', 'nkey', 'nsc'")
+	}
+
+	if c.config.WinCertStoreType != "" {
+		_, err := c.parseWinCertStoreType(c.config.WinCertStoreType)
+		if err != nil {
+			return err
+		}
+	}
+
+	if c.config.WinCertStoreMatchBy != "" {
+		_, err := certstore.ParseCertMatchBy(c.config.WinCertStoreMatchBy)
+		if err != nil {
+			return err
+		}
+	}
+
+	if c.config.WinCertStoreType != "" && c.config.WinCertStoreMatch == "" {
+		return fmt.Errorf("windows certificate store requires a matcher")
 	}
 
 	return nil
@@ -771,9 +976,23 @@ func WithUserJWT(p string) Option {
 	}
 }
 
+// WithUserSeed sets the user seed
+func WithUserSeed(p string) Option {
+	return func(s *settings) {
+		if p != "" {
+			s.UserSeed = p
+		}
+	}
+}
+
 // UserJWT retrieves the configured user jwt, empty if not set
 func (c *Context) UserJWT() string {
 	return c.config.UserJwt
+}
+
+// UserSeed retrieves the configured user seed, empty if not set
+func (c *Context) UserSeed() string {
+	return c.config.UserSeed
 }
 
 // WithSocksProxy sets the SOCKS5 Proxy.
@@ -803,4 +1022,61 @@ func WithTLSHandshakeFirst() Option {
 // TLSHandshakeFirst configures the connection to do a TLS Handshake before expecting server INFO
 func (c *Context) TLSHandshakeFirst() bool {
 	return c.config.TLSFirst
+}
+
+// WithWindowsCertStore configures TLS to use a Windows Certificate Store. Valid values are "user" or "machine"
+func WithWindowsCertStore(storeType string) Option {
+	return func(s *settings) {
+		if storeType != "" {
+			s.WinCertStoreType = storeType
+		}
+	}
+}
+
+// WindowsCertStore indicates if the cert store should be used and which type
+func (c *Context) WindowsCertStore() string { return c.config.WinCertStoreType }
+
+// WithWindowsCertStoreMatchBy configures Matching behavior for Windows Certificate Store. Valid values are "issuer" or "subject"
+func WithWindowsCertStoreMatchBy(matchBy string) Option {
+	return func(s *settings) {
+		if matchBy != "" {
+			s.WinCertStoreMatchBy = matchBy
+		}
+	}
+}
+
+// WindowsCertStoreMatchBy indicates which property will be used to search in the store
+func (c *Context) WindowsCertStoreMatchBy() string { return c.config.WinCertStoreMatchBy }
+
+// WithWindowsCertStoreMatch configures the matcher query to select certificates with, see WithWindowsCertStoreMatchBy
+func WithWindowsCertStoreMatch(match string) Option {
+	return func(s *settings) {
+		if match != "" {
+			s.WinCertStoreMatch = match
+		}
+	}
+}
+
+// WindowsCertStoreMatch is the string to use when searching a certificate in the windows certificate store
+func (c *Context) WindowsCertStoreMatch() string { return c.config.WinCertStoreMatch }
+
+// WithWindowsCaCertsMatch configures criteria used to search for Certificate Authorities in the windows certificate store
+func WithWindowsCaCertsMatch(match ...string) Option {
+	return func(s *settings) {
+		if len(match) > 0 {
+			s.WinCertStoreCaMatch = match
+		}
+	}
+}
+
+// WindowsCaCertsMatch are criteria used to search for Certificate Authorities in the windows certificate store
+func (c *Context) WindowsCaCertsMatch() []string { return c.config.WinCertStoreCaMatch }
+
+func wipeSlice(buf []byte) {
+	for i := range buf {
+		buf[i] = 'x'
+	}
+	// KeepAlive prevents the compiler from treating the loop as a dead store
+	// and eliding the writes before the slice is garbage collected.
+	runtime.KeepAlive(buf)
 }

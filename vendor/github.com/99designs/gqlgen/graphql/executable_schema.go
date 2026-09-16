@@ -5,6 +5,7 @@ package graphql
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"github.com/vektah/gqlparser/v2/ast"
 )
@@ -12,18 +13,56 @@ import (
 type ExecutableSchema interface {
 	Schema() *ast.Schema
 
-	Complexity(typeName, fieldName string, childComplexity int, args map[string]interface{}) (int, bool)
+	Complexity(
+		ctx context.Context,
+		typeName, fieldName string,
+		childComplexity int,
+		args map[string]any,
+	) (int, bool)
 	Exec(ctx context.Context) ResponseHandler
 }
 
-// CollectFields returns the set of fields from an ast.SelectionSet where all collected fields satisfy at least one of the GraphQL types
-// passed through satisfies. Providing an empty or nil slice for satisfies will return collect all fields regardless of fragment
-// type conditions.
-func CollectFields(reqCtx *OperationContext, selSet ast.SelectionSet, satisfies []string) []CollectedField {
-	return collectFields(reqCtx, selSet, satisfies, map[string]bool{})
+// ExecutableSchemaWithEventContext is the optional interface a generated
+// [ExecutableSchema] implements when at least one of its subscription fields
+// is annotated with the @subscriptionContext directive. The graphql executor
+// type-asserts for this interface; absence falls back to
+// [ExecutableSchema.Exec] with no behavior change.
+//
+// Implementations must guarantee that the returned [ResponseHandlerWithContext]
+// reports a context derived from the subscription's request context for every
+// iteration — never an unrelated background context — so request-scoped
+// values remain reachable.
+type ExecutableSchemaWithEventContext interface {
+	ExecutableSchema
+	ExecWithEventContext(ctx context.Context) ResponseHandlerWithContext
 }
 
-func collectFields(reqCtx *OperationContext, selSet ast.SelectionSet, satisfies []string, visited map[string]bool) []CollectedField {
+// CollectFields returns the set of fields from an ast.SelectionSet where all collected fields
+// satisfy at least one of the GraphQL types passed through satisfies. Providing an empty slice for
+// satisfies will collect all fields regardless of fragment type conditions.
+func CollectFields(
+	reqCtx *OperationContext,
+	selSet ast.SelectionSet,
+	satisfies []string,
+) []CollectedField {
+	cacheKey := makeCollectFieldsCacheKey(selSet, satisfies)
+
+	if cached, ok := reqCtx.collectFieldsCache.Get(cacheKey); ok {
+		return cached
+	}
+
+	result := collectFields(reqCtx, selSet, satisfies, map[string]bool{}, false)
+
+	return reqCtx.collectFieldsCache.Add(cacheKey, result)
+}
+
+func collectFields(
+	reqCtx *OperationContext,
+	selSet ast.SelectionSet,
+	satisfies []string,
+	visited map[string]bool,
+	parentIsDeferredFragment bool,
+) []CollectedField {
 	groupedFields := make([]CollectedField, 0, len(selSet))
 
 	for _, sel := range selSet {
@@ -32,40 +71,66 @@ func collectFields(reqCtx *OperationContext, selSet ast.SelectionSet, satisfies 
 			if !shouldIncludeNode(sel.Directives, reqCtx.Variables) {
 				continue
 			}
-			f := getOrCreateAndAppendField(&groupedFields, sel.Name, sel.Alias, sel.ObjectDefinition, func() CollectedField {
-				return CollectedField{Field: sel}
-			})
+			f := getOrCreateAndAppendField(
+				&groupedFields,
+				sel.Name,
+				sel.Alias,
+				sel.ObjectDefinition,
+				func() CollectedField {
+					return CollectedField{Field: sel}
+				},
+			)
 
+			if !parentIsDeferredFragment {
+				f.IsNonDeferrable = true
+			}
 			f.Selections = append(f.Selections, sel.SelectionSet...)
 
 		case *ast.InlineFragment:
 			if !shouldIncludeNode(sel.Directives, reqCtx.Variables) {
 				continue
 			}
-			if len(satisfies) > 0 && !instanceOf(sel.TypeCondition, satisfies) {
+			if !doesFragmentConditionMatch(sel.TypeCondition, satisfies) {
 				continue
 			}
 
 			shouldDefer, label := deferrable(sel.Directives, reqCtx.Variables)
-
-			for _, childField := range collectFields(reqCtx, sel.SelectionSet, satisfies, visited) {
+			childFields := collectFields(
+				reqCtx,
+				sel.SelectionSet,
+				satisfies,
+				visited,
+				shouldDefer || parentIsDeferredFragment,
+			)
+			for _, childField := range childFields {
+				var isChildField bool
 				f := getOrCreateAndAppendField(
 					&groupedFields, childField.Name, childField.Alias, childField.ObjectDefinition,
-					func() CollectedField { return childField })
-				f.Selections = append(f.Selections, childField.Selections...)
+					func() CollectedField {
+						isChildField = true
+						return childField
+					})
+
+				if !isChildField {
+					f.Selections = append(f.Selections, childField.Selections...)
+					f.Deferrables = slices.Grow(f.Deferrables, len(childField.Deferrables)+1)
+					f.Deferrables = append(f.Deferrables, childField.Deferrables...)
+					f.IsNonDeferrable = f.IsNonDeferrable || childField.IsNonDeferrable
+				}
+
 				if shouldDefer {
-					f.Deferrable = &Deferrable{
+					f.Deferrables = append(f.Deferrables, &Deferrable{
 						Label: label,
-					}
+					})
 				}
 			}
 
 		case *ast.FragmentSpread:
-			if !shouldIncludeNode(sel.Directives, reqCtx.Variables) {
-				continue
-			}
 			fragmentName := sel.Name
 			if _, seen := visited[fragmentName]; seen {
+				continue
+			}
+			if !shouldIncludeNode(sel.Directives, reqCtx.Variables) {
 				continue
 			}
 			visited[fragmentName] = true
@@ -75,20 +140,39 @@ func collectFields(reqCtx *OperationContext, selSet ast.SelectionSet, satisfies 
 				// should never happen, validator has already run
 				panic(fmt.Errorf("missing fragment %s", fragmentName))
 			}
-
-			if len(satisfies) > 0 && !instanceOf(fragment.TypeCondition, satisfies) {
+			if !doesFragmentConditionMatch(fragment.TypeCondition, satisfies) {
 				continue
 			}
 
 			shouldDefer, label := deferrable(sel.Directives, reqCtx.Variables)
 
-			for _, childField := range collectFields(reqCtx, fragment.SelectionSet, satisfies, visited) {
+			childFields := collectFields(
+				reqCtx,
+				fragment.SelectionSet,
+				satisfies,
+				visited,
+				shouldDefer || parentIsDeferredFragment,
+			)
+			for _, childField := range childFields {
+				var isChildField bool
 				f := getOrCreateAndAppendField(&groupedFields,
 					childField.Name, childField.Alias, childField.ObjectDefinition,
-					func() CollectedField { return childField })
-				f.Selections = append(f.Selections, childField.Selections...)
+					func() CollectedField {
+						isChildField = true
+						return childField
+					})
+
+				if !isChildField {
+					f.Selections = append(f.Selections, childField.Selections...)
+					f.Deferrables = slices.Grow(f.Deferrables, len(childField.Deferrables)+1)
+					f.Deferrables = append(f.Deferrables, childField.Deferrables...)
+					f.IsNonDeferrable = f.IsNonDeferrable || childField.IsNonDeferrable
+				}
+
 				if shouldDefer {
-					f.Deferrable = &Deferrable{Label: label}
+					f.Deferrables = append(f.Deferrables, &Deferrable{
+						Label: label,
+					})
 				}
 			}
 
@@ -104,19 +188,62 @@ type CollectedField struct {
 	*ast.Field
 
 	Selections ast.SelectionSet
-	Deferrable *Deferrable
+
+	// IsNonDeferrable reports whether the field cannot be deferred,
+	// regardless of what [Deferrables] reports. This is the case when the
+	// same field is selected in a query from both within a deferred fragment,
+	// and outside of one.
+	//
+	// Example - account cannot be deferred in this example:
+	//	query {
+	//		... @defer(label: "foo") {
+	//			account {
+	//				id
+	//			}
+	//		}
+	//
+	//		account {
+	//			id
+	//		}
+	//	}
+	IsNonDeferrable bool
+	Deferrables     []*Deferrable
 }
 
-func instanceOf(val string, satisfies []string) bool {
-	for _, s := range satisfies {
-		if val == s {
-			return true
-		}
+// IsDeferred reports whether this field's resolution should be deferred
+// (collected into a [FieldSetView] keyed by every label in [Deferrables])
+// rather than emitted in the initial response. A field is deferred when it
+// appears inside at least one @defer fragment and is not also selected
+// outside of one — the [IsNonDeferrable] flag overrides Deferrables.
+func (f CollectedField) IsDeferred() bool {
+	return len(f.Deferrables) > 0 && !f.IsNonDeferrable
+}
+
+func doesFragmentConditionMatch(typeCondition string, satisfies []string) bool {
+	// To allow simplified "collect all" types behavior, pass an empty list of types
+	// that the type condition must satisfy: we will apply the fragment regardless of
+	// type condition.
+	if len(satisfies) == 0 {
+		return true
 	}
-	return false
+
+	// When the type condition is not set (... { field }) we will apply the fragment
+	// to any satisfying types.
+	if typeCondition == "" {
+		return true
+	}
+
+	// To handle abstract types we pass in a list of all known types that the current
+	// type will satisfy.
+	return slices.Contains(satisfies, typeCondition)
 }
 
-func getOrCreateAndAppendField(c *[]CollectedField, name string, alias string, objectDefinition *ast.Definition, creator func() CollectedField) *CollectedField {
+func getOrCreateAndAppendField(
+	c *[]CollectedField,
+	name, alias string,
+	objectDefinition *ast.Definition,
+	creator func() CollectedField,
+) *CollectedField {
 	for i, cf := range *c {
 		if cf.Name == name && cf.Alias == alias {
 			if cf.ObjectDefinition == objectDefinition {
@@ -131,15 +258,11 @@ func getOrCreateAndAppendField(c *[]CollectedField, name string, alias string, o
 				return &(*c)[i]
 			}
 
-			for _, ifc := range objectDefinition.Interfaces {
-				if ifc == cf.ObjectDefinition.Name {
-					return &(*c)[i]
-				}
+			if slices.Contains(objectDefinition.Interfaces, cf.ObjectDefinition.Name) {
+				return &(*c)[i]
 			}
-			for _, ifc := range cf.ObjectDefinition.Interfaces {
-				if ifc == objectDefinition.Name {
-					return &(*c)[i]
-				}
+			if slices.Contains(cf.ObjectDefinition.Interfaces, objectDefinition.Name) {
+				return &(*c)[i]
 			}
 		}
 	}
@@ -150,7 +273,7 @@ func getOrCreateAndAppendField(c *[]CollectedField, name string, alias string, o
 	return &(*c)[len(*c)-1]
 }
 
-func shouldIncludeNode(directives ast.DirectiveList, variables map[string]interface{}) bool {
+func shouldIncludeNode(directives ast.DirectiveList, variables map[string]any) bool {
 	if len(directives) == 0 {
 		return true
 	}
@@ -168,7 +291,10 @@ func shouldIncludeNode(directives ast.DirectiveList, variables map[string]interf
 	return !skip && include
 }
 
-func deferrable(directives ast.DirectiveList, variables map[string]interface{}) (shouldDefer bool, label string) {
+func deferrable(
+	directives ast.DirectiveList,
+	variables map[string]any,
+) (shouldDefer bool, label string) {
 	d := directives.ForName("defer")
 	if d == nil {
 		return false, ""
@@ -194,7 +320,7 @@ func deferrable(directives ast.DirectiveList, variables map[string]interface{}) 
 	return shouldDefer, label
 }
 
-func resolveIfArgument(d *ast.Directive, variables map[string]interface{}) bool {
+func resolveIfArgument(d *ast.Directive, variables map[string]any) bool {
 	arg := d.Arguments.ForName("if")
 	if arg == nil {
 		panic(fmt.Sprintf("%s: argument 'if' not defined", d.Name))

@@ -24,21 +24,24 @@ type node interface {
 	isFull() bool
 	grow() node
 	shrink() node
-	matchParts(parts [][]byte) ([][]byte, bool)
 	kind() string
 	iter(f func(node) bool)
 	children() []node
 	numChildren() uint16
-	path() []byte
+	path() string
 }
 
-// Maximum prefix len
-// We expect the most savings to come from long shared prefixes.
-const maxPrefixLen = 24
-
-// 64 bytes total - an L1 cache line.
 type meta struct {
-	prefix    [maxPrefixLen]byte
-	prefixLen uint16
-	size      uint16
+	prefix string
+	size   uint16
 }
+
+func (n *meta) isLeaf() bool { return false }
+func (n *meta) base() *meta  { return n }
+
+func (n *meta) setPrefix(pre []byte) {
+	n.prefix = string(pre)
+}
+
+func (n *meta) numChildren() uint16 { return n.size }
+func (n *meta) path() string        { return n.prefix }

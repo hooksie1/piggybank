@@ -1,4 +1,4 @@
-// Copyright 2016-2024 The NATS Authors
+// Copyright 2016-2025 The NATS Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -16,6 +16,7 @@ package server
 import (
 	"bytes"
 	"errors"
+	"iter"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -118,6 +119,18 @@ func NewSublist(enableCache bool) *Sublist {
 		return &Sublist{root: newLevel(), cache: make(map[string]*SublistResult)}
 	}
 	return &Sublist{root: newLevel()}
+}
+
+// NewSublistForServer will create a default sublist with caching enabled determined
+// by the server options.
+func NewSublistForServer(srv *Server) *Sublist {
+	if srv == nil {
+		return NewSublistNoCache() // Probably just unit tests.
+	}
+	if opts := srv.getOpts(); opts != nil {
+		return NewSublist(!opts.NoSublistCache)
+	}
+	return NewSublistNoCache()
 }
 
 // NewSublistWithCache will create a default sublist with caching enabled.
@@ -355,16 +368,6 @@ func (s *Sublist) chkForRemoveNotification(subject, queue string) {
 func (s *Sublist) Insert(sub *subscription) error {
 	// copy the subject since we hold this and this might be part of a large byte slice.
 	subject := string(sub.subject)
-	tsa := [32]string{}
-	tokens := tsa[:0]
-	start := 0
-	for i := 0; i < len(subject); i++ {
-		if subject[i] == btsep {
-			tokens = append(tokens, subject[start:i])
-			start = i + 1
-		}
-	}
-	tokens = append(tokens, subject[start:])
 
 	s.Lock()
 
@@ -372,7 +375,7 @@ func (s *Sublist) Insert(sub *subscription) error {
 	var n *node
 	l := s.root
 
-	for _, t := range tokens {
+	for t := range strings.SplitSeq(subject, tsep) {
 		lt := len(t)
 		if lt == 0 || sfwc {
 			s.Unlock()
@@ -504,7 +507,7 @@ func (s *Sublist) addToCache(subject string, sub *subscription) {
 
 // removeFromCache will remove the sub from any active cache entries.
 // Assumes write lock is held.
-func (s *Sublist) removeFromCache(subject string, sub *subscription) {
+func (s *Sublist) removeFromCache(subject string) {
 	if s.cache == nil {
 		return
 	}
@@ -527,14 +530,33 @@ var emptyResult = &SublistResult{}
 // Match will match all entries to the literal subject.
 // It will return a set of results for both normal and queue subscribers.
 func (s *Sublist) Match(subject string) *SublistResult {
-	return s.match(subject, true)
+	return s.match(subject, true, false)
+}
+
+// MatchBytes will match all entries to the literal subject.
+// It will return a set of results for both normal and queue subscribers.
+func (s *Sublist) MatchBytes(subject []byte) *SublistResult {
+	return s.match(bytesToString(subject), true, true)
+}
+
+// HasInterest will return whether or not there is any interest in the subject.
+// In cases where more detail is not required, this may be faster than Match.
+func (s *Sublist) HasInterest(subject string) bool {
+	return s.hasInterest(subject, true, nil, nil)
+}
+
+// NumInterest will return the number of subs/qsubs interested in the subject.
+// In cases where more detail is not required, this may be faster than Match.
+func (s *Sublist) NumInterest(subject string) (np, nq int) {
+	s.hasInterest(subject, true, &np, &nq)
+	return
 }
 
 func (s *Sublist) matchNoLock(subject string) *SublistResult {
-	return s.match(subject, false)
+	return s.match(subject, false, false)
 }
 
-func (s *Sublist) match(subject string, doLock bool) *SublistResult {
+func (s *Sublist) match(subject string, doLock bool, doCopyOnCache bool) *SublistResult {
 	atomic.AddUint64(&s.matches, 1)
 
 	// Check cache first.
@@ -589,6 +611,9 @@ func (s *Sublist) match(subject string, doLock bool) *SublistResult {
 		result = emptyResult
 	}
 	if cacheEnabled {
+		if doCopyOnCache {
+			subject = copyString(subject)
+		}
 		s.cache[subject] = result
 		n = len(s.cache)
 	}
@@ -606,6 +631,56 @@ func (s *Sublist) match(subject string, doLock bool) *SublistResult {
 	}
 
 	return result
+}
+
+func (s *Sublist) hasInterest(subject string, doLock bool, np, nq *int) bool {
+	// Check cache first.
+	if doLock {
+		s.RLock()
+	}
+	var matched, ok bool
+	if s.cache != nil {
+		var r *SublistResult
+		if r, ok = s.cache[subject]; ok {
+			if np != nil && nq != nil {
+				*np += len(r.psubs)
+				for _, qsub := range r.qsubs {
+					*nq += len(qsub)
+				}
+			}
+			matched = len(r.psubs)+len(r.qsubs) > 0
+		}
+	}
+	if doLock {
+		s.RUnlock()
+	}
+	if ok {
+		atomic.AddUint64(&s.cacheHits, 1)
+		return matched
+	}
+
+	tsa := [32]string{}
+	tokens := tsa[:0]
+	start := 0
+	for i := 0; i < len(subject); i++ {
+		if subject[i] == btsep {
+			if i-start == 0 {
+				return false
+			}
+			tokens = append(tokens, subject[start:i])
+			start = i + 1
+		}
+	}
+	if start >= len(subject) {
+		return false
+	}
+	tokens = append(tokens, subject[start:])
+
+	if doLock {
+		s.RLock()
+		defer s.RUnlock()
+	}
+	return matchLevelForAny(s.root, tokens, np, nq)
 }
 
 // Remove entries in the cache until we are under the maximum.
@@ -635,7 +710,7 @@ func (s *Sublist) UpdateRemoteQSub(sub *subscription) {
 	// it unless we are thrashing the cache. Just remove from our L2 and update
 	// the genid so L1 will be flushed.
 	s.Lock()
-	s.removeFromCache(string(sub.subject), sub)
+	s.removeFromCache(string(sub.subject))
 	atomic.AddUint64(&s.genid, 1)
 	s.Unlock()
 }
@@ -720,6 +795,56 @@ func matchLevel(l *level, toks []string, results *SublistResult) {
 	}
 }
 
+func matchLevelForAny(l *level, toks []string, np, nq *int) bool {
+	var pwc, n *node
+	for i, t := range toks {
+		if l == nil {
+			return false
+		}
+		if l.fwc != nil {
+			if np != nil && nq != nil {
+				*np += len(l.fwc.psubs)
+				for _, qsub := range l.fwc.qsubs {
+					*nq += len(qsub)
+				}
+			}
+			return true
+		}
+		if pwc = l.pwc; pwc != nil {
+			if match := matchLevelForAny(pwc.next, toks[i+1:], np, nq); match {
+				return true
+			}
+		}
+		n = l.nodes[t]
+		if n != nil {
+			l = n.next
+		} else {
+			l = nil
+		}
+	}
+	if n != nil {
+		if np != nil && nq != nil {
+			*np += len(n.psubs)
+			for _, qsub := range n.qsubs {
+				*nq += len(qsub)
+			}
+		}
+		if len(n.plist) > 0 || len(n.psubs) > 0 || len(n.qsubs) > 0 {
+			return true
+		}
+	}
+	if pwc != nil {
+		if np != nil && nq != nil {
+			*np += len(pwc.psubs)
+			for _, qsub := range pwc.qsubs {
+				*nq += len(qsub)
+			}
+		}
+		return len(pwc.plist) > 0 || len(pwc.psubs) > 0 || len(pwc.qsubs) > 0
+	}
+	return false
+}
+
 // lnt is used to track descent into levels for a removal for pruning.
 type lnt struct {
 	l *level
@@ -730,16 +855,6 @@ type lnt struct {
 // Raw low level remove, can do batches with lock held outside.
 func (s *Sublist) remove(sub *subscription, shouldLock bool, doCacheUpdates bool) error {
 	subject := string(sub.subject)
-	tsa := [32]string{}
-	tokens := tsa[:0]
-	start := 0
-	for i := 0; i < len(subject); i++ {
-		if subject[i] == btsep {
-			tokens = append(tokens, subject[start:i])
-			start = i + 1
-		}
-	}
-	tokens = append(tokens, subject[start:])
 
 	if shouldLock {
 		s.Lock()
@@ -754,7 +869,7 @@ func (s *Sublist) remove(sub *subscription, shouldLock bool, doCacheUpdates bool
 	var lnts [32]lnt
 	levels := lnts[:0]
 
-	for _, t := range tokens {
+	for t := range strings.SplitSeq(subject, tsep) {
 		lt := len(t)
 		if lt == 0 || sfwc {
 			return ErrInvalidSubject
@@ -798,7 +913,7 @@ func (s *Sublist) remove(sub *subscription, shouldLock bool, doCacheUpdates bool
 		}
 	}
 	if doCacheUpdates {
-		s.removeFromCache(subject, sub)
+		s.removeFromCache(subject)
 		atomic.AddUint64(&s.genid, 1)
 	}
 
@@ -874,6 +989,9 @@ func (n *node) isEmpty() bool {
 
 // Return the number of nodes for the given level.
 func (l *level) numNodes() int {
+	if l == nil {
+		return 0
+	}
 	num := len(l.nodes)
 	if l.pwc != nil {
 		num++
@@ -1093,6 +1211,10 @@ func isValidSubject(subject string, checkRunes bool) bool {
 		return false
 	}
 	if checkRunes {
+		// Check if we have embedded nulls.
+		if bytes.IndexByte(stringToBytes(subject), 0) >= 0 {
+			return false
+		}
 		// Since casting to a string will always produce valid UTF-8, we need to look for replacement runes.
 		// This signals something is off or corrupt.
 		for _, r := range subject {
@@ -1102,8 +1224,7 @@ func isValidSubject(subject string, checkRunes bool) bool {
 		}
 	}
 	sfwc := false
-	tokens := strings.Split(subject, tsep)
-	for _, t := range tokens {
+	for t := range strings.SplitSeq(subject, tsep) {
 		length := len(t)
 		if length == 0 || sfwc {
 			return false
@@ -1126,12 +1247,12 @@ func isValidSubject(subject string, checkRunes bool) bool {
 
 // IsValidLiteralSubject returns true if a subject is valid and literal (no wildcards), false otherwise
 func IsValidLiteralSubject(subject string) bool {
-	return isValidLiteralSubject(strings.Split(subject, tsep))
+	return isValidLiteralSubject(strings.SplitSeq(subject, tsep))
 }
 
 // isValidLiteralSubject returns true if the tokens are valid and literal (no wildcards), false otherwise
-func isValidLiteralSubject(tokens []string) bool {
-	for _, t := range tokens {
+func isValidLiteralSubject(tokens iter.Seq[string]) bool {
+	for t := range tokens {
 		if len(t) == 0 {
 			return false
 		}
@@ -1146,19 +1267,19 @@ func isValidLiteralSubject(tokens []string) bool {
 	return true
 }
 
-// ValidateMappingDestination returns nil error if the subject is a valid subject mapping destination subject
-func ValidateMappingDestination(subject string) error {
-	if subject == _EMPTY_ {
+// ValidateMapping returns nil error if the subject is a valid subject mapping destination subject
+func ValidateMapping(src string, dest string) error {
+	if dest == _EMPTY_ {
 		return nil
 	}
-	subjectTokens := strings.Split(subject, tsep)
 	sfwc := false
-	for _, t := range subjectTokens {
+	for t := range strings.SplitSeq(dest, tsep) {
 		length := len(t)
 		if length == 0 || sfwc {
 			return &mappingDestinationErr{t, ErrInvalidMappingDestinationSubject}
 		}
 
+		// if it looks like it contains a mapping function, it should be a valid mapping function
 		if length > 4 && t[0] == '{' && t[1] == '{' && t[length-2] == '}' && t[length-1] == '}' {
 			if !partitionMappingFunctionRegEx.MatchString(t) &&
 				!wildcardMappingFunctionRegEx.MatchString(t) &&
@@ -1166,7 +1287,8 @@ func ValidateMappingDestination(subject string) error {
 				!splitFromRightMappingFunctionRegEx.MatchString(t) &&
 				!sliceFromLeftMappingFunctionRegEx.MatchString(t) &&
 				!sliceFromRightMappingFunctionRegEx.MatchString(t) &&
-				!splitMappingFunctionRegEx.MatchString(t) {
+				!splitMappingFunctionRegEx.MatchString(t) &&
+				!randomMappingFunctionRegEx.MatchString(t) {
 				return &mappingDestinationErr{t, ErrUnknownMappingDestinationFunction}
 			} else {
 				continue
@@ -1179,7 +1301,10 @@ func ValidateMappingDestination(subject string) error {
 			return ErrInvalidMappingDestinationSubject
 		}
 	}
-	return nil
+
+	// Finally, verify that the transform can actually be created from the source and destination
+	_, err := NewSubjectTransform(src, dest)
+	return err
 }
 
 // Will check tokens and report back if the have any partial or full wildcards.
@@ -1215,8 +1340,9 @@ func SubjectsCollide(subj1, subj2 string) bool {
 	if subj1 == subj2 {
 		return true
 	}
-	toks1 := strings.Split(subj1, tsep)
-	toks2 := strings.Split(subj2, tsep)
+	tsa, tsb := [32]string{}, [32]string{}
+	toks1 := tokenizeSubjectIntoSlice(tsa[:0], subj1)
+	toks2 := tokenizeSubjectIntoSlice(tsb[:0], subj2)
 	pwc1, fwc1 := analyzeTokens(toks1)
 	pwc2, fwc2 := analyzeTokens(toks2)
 	// if both literal just string compare.
@@ -1226,9 +1352,9 @@ func SubjectsCollide(subj1, subj2 string) bool {
 	}
 	// So one or both have wildcards. If one is literal than we can do subset matching.
 	if l1 && !l2 {
-		return isSubsetMatch(toks1, subj2)
+		return isSubsetMatchTokenized(toks1, toks2)
 	} else if l2 && !l1 {
-		return isSubsetMatch(toks2, subj1)
+		return isSubsetMatchTokenized(toks2, toks1)
 	}
 	// Both have wildcards.
 	// If they only have partials then the lengths must match.
@@ -1302,6 +1428,12 @@ func tokenizeSubjectIntoSlice(tts []string, subject string) []string {
 	}
 	tts = append(tts, subject[start:])
 	return tts
+}
+
+// SubjectMatchesFilter returns true if the subject matches the provided
+// filter or false otherwise.
+func SubjectMatchesFilter(subject, filter string) bool {
+	return subjectIsSubsetMatch(subject, filter)
 }
 
 // Calls into the function isSubsetMatch()
