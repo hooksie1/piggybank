@@ -12,7 +12,7 @@ const (
 	databaseSubject              = "piggybank.database"
 	databaseInitSubject          = "initialize"
 	databaseUnlockSubject        = "unlock"
-	databaseLockSubject          = "lock"
+	databaseLockSubject          = "locked"
 	databaseStatusSubject        = "status"
 	databaseRotateSubject        = "rotate"
 	DBInit                DBVerb = "init"
