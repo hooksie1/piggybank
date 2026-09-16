@@ -10,7 +10,7 @@ import (
 
 const (
 	databaseSubject              = "piggybank.database"
-	databaseInitSubject          = "initialize"
+	databaseInitSubject          = "initialized"
 	databaseUnlockSubject        = "unlock"
 	databaseLockSubject          = "locked"
 	databaseStatusSubject        = "status"
