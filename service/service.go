@@ -23,7 +23,7 @@ func DBGroup(svc micro.Service, logger *logr.Logger, appCtx AppContext) {
 		}),
 		micro.WithEndpointSubject(databaseStatusSubject),
 	)
-	dbGroup.AddEndpoint("lock",
+	dbGroup.AddEndpoint("locked",
 		AppHandler(logger, Lock, appCtx),
 		micro.WithEndpointMetadata(map[string]string{
 			"description": "locks the database",
