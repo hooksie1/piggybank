@@ -14,7 +14,7 @@ const (
 	databaseUnlockSubject        = "unlock"
 	databaseLockSubject          = "locked"
 	databaseStatusSubject        = "status"
-	databaseRotateSubject        = "rotate"
+	databaseRotateSubject        = "rotates"
 	DBInit                DBVerb = "init"
 	DBLock                DBVerb = "lock"
 	DBUnlock              DBVerb = "unlock"
